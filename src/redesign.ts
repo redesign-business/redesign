@@ -250,6 +250,7 @@ export function buildDesignPrompt(options: {
     "",
     "Task:",
     "Create design.md. Do not build the site. Do not deploy.",
+    "First make sure the current repo has the latest main from GitHub.",
     "The goal is a tasteful presentation of the proof in this standard landing-page order: nav, hero, several proof sections, FAQ, final CTA, footer.",
     "Design system must include: one font or separate heading/body fonts, neutral palette, primary color, optional secondary color, spacing, border radius, borders yes/no, shadows yes/no, motion/animation usage, and icon library.",
     "Composition must include concrete descriptions of the layout for the nav, hero, proof sections, FAQ, final CTA, footer, and any useful proof-focused band below the hero.",
@@ -281,6 +282,7 @@ export function buildSitePrompt(options: {
     `Preferred redesign URL: ${options.expectedRedesignUrl}`,
     "",
     "Task:",
+    "First make sure the current repo has the latest main from GitHub.",
     "Use design.md as the design handoff. Use proof.md as the content/proof source of truth. Use raw.md and images/ only as supporting source material.",
     "3) Build the site. Use the business's unique data to inspire the design. Typical structure: nav, hero, several proof sections, FAQ, final CTA, footer. No text-only sections except nav, banners, the bar below hero, and footer. Do not repeat images or other media. There is one CTA; use it everywhere.",
     "4) Run the refine-landing-page pass.",
@@ -1257,7 +1259,7 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
 
     const design = await sandbox.runCommand({
       cmd: OPENCODE_BIN,
-      args: ["run", "Follow the attached design prompt.", "--auto", "--dir", WORKDIR, "--title", `Design ${slug}`, "--model", opencodeModelForGatewayModel(designModel), "--file", "/tmp/design-prompt.md"],
+      args: ["run", "git pull --ff-only && follow the attached design prompt.", "--auto", "--dir", WORKDIR, "--title", `Design ${slug}`, "--model", opencodeModelForGatewayModel(designModel), "--file", "/tmp/design-prompt.md"],
       detached: true,
     });
     result.command = design.cmdId;
@@ -1282,7 +1284,7 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
 
     const build = await sandbox.runCommand({
       cmd: OPENCODE_BIN,
-      args: ["run", "Follow the attached implementation prompt.", "--auto", "--dir", WORKDIR, "--title", `Implement ${slug}`, "--model", opencodeModelForGatewayModel(implementationModel), "--file", "/tmp/site-prompt.md"],
+      args: ["run", "git pull --ff-only && follow the attached implementation prompt.", "--auto", "--dir", WORKDIR, "--title", `Implement ${slug}`, "--model", opencodeModelForGatewayModel(implementationModel), "--file", "/tmp/site-prompt.md"],
       detached: true,
     });
     result.command = build.cmdId;
