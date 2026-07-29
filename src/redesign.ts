@@ -78,7 +78,7 @@ const DEFAULT_BUILD_MODEL = "openai/gpt-5.6-sol";
 const DEFAULT_GITHUB_OWNER = "redesign-business";
 const DEFAULT_BASE_DOMAIN = "redesign.business";
 const DEFAULT_AI_GATEWAY_BUDGET = 1;
-const LOG_STREAM_IDLE_MS = 60_000;
+const LOG_STREAM_IDLE_MS = 10_000;
 
 const skillFiles = [
   "nextjs-site-building",
@@ -310,19 +310,13 @@ async function waitForCommand(command: Command) {
   }
 }
 
-async function streamUntilFinished(command: Command, startedAt: number) {
+async function streamUntilFinished(command: Command, _startedAt: number) {
   const logsAbort = new AbortController();
   let output = "";
-  let lastLogAt = Date.now();
   let finished = false;
   const waitPromise = waitForCommand(command).finally(() => {
     finished = true;
   });
-  const heartbeat = setInterval(() => {
-    const elapsed = Math.round((Date.now() - startedAt) / 1000);
-    const quietFor = Math.round((Date.now() - lastLogAt) / 1000);
-    console.log(`\nStatus: still running (${elapsed}s elapsed, last output ${quietFor}s ago)`);
-  }, 30_000);
 
   const logsPromise = (async () => {
     while (!finished && !logsAbort.signal.aborted) {
@@ -345,15 +339,15 @@ async function streamUntilFinished(command: Command, startedAt: number) {
           resetIdleTimer();
           const fresh = appendWithoutReplay(output, log.data);
           if (!fresh) continue;
-          lastLogAt = Date.now();
           output += fresh;
           const stream = log.stream === "stderr" ? process.stderr : process.stdout;
           stream.write(fresh);
         }
       } catch (error) {
         if (!logsAbort.signal.aborted && !finished) {
-          const reason = idleReconnect ? "idle" : error instanceof Error ? error.message : String(error);
-          console.error(`\nLog stream disconnected; reconnecting. ${reason}`);
+          if (!idleReconnect) {
+            console.error(`\nLog stream disconnected; reconnecting. ${error instanceof Error ? error.message : String(error)}`);
+          }
           await sleep(2_000);
         }
       } finally {
@@ -369,7 +363,6 @@ async function streamUntilFinished(command: Command, startedAt: number) {
     result = await waitPromise;
   } finally {
     logsAbort.abort();
-    clearInterval(heartbeat);
     await logsPromise;
   }
 
