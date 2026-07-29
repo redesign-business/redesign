@@ -78,6 +78,7 @@ const DEFAULT_BUILD_MODEL = "openai/gpt-5.6-sol";
 const DEFAULT_GITHUB_OWNER = "redesign-business";
 const DEFAULT_BASE_DOMAIN = "redesign.business";
 const DEFAULT_AI_GATEWAY_BUDGET = 1;
+const LOG_STREAM_IDLE_MS = 60_000;
 
 const skillFiles = [
   "nextjs-site-building",
@@ -325,8 +326,23 @@ async function streamUntilFinished(command: Command, startedAt: number) {
 
   const logsPromise = (async () => {
     while (!finished && !logsAbort.signal.aborted) {
+      const streamAbort = new AbortController();
+      let idleReconnect = false;
+      let idleTimer: ReturnType<typeof setTimeout> | undefined;
+      const resetIdleTimer = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          idleReconnect = true;
+          streamAbort.abort("Log stream idle");
+        }, LOG_STREAM_IDLE_MS);
+      };
+      const abortStream = () => streamAbort.abort(logsAbort.signal.reason);
+      logsAbort.signal.addEventListener("abort", abortStream, { once: true });
+      resetIdleTimer();
+
       try {
-        for await (const log of command.logs({ signal: logsAbort.signal })) {
+        for await (const log of command.logs({ signal: streamAbort.signal })) {
+          resetIdleTimer();
           const fresh = appendWithoutReplay(output, log.data);
           if (!fresh) continue;
           lastLogAt = Date.now();
@@ -336,9 +352,13 @@ async function streamUntilFinished(command: Command, startedAt: number) {
         }
       } catch (error) {
         if (!logsAbort.signal.aborted && !finished) {
-          console.error(`\nLog stream disconnected; reconnecting. ${error instanceof Error ? error.message : String(error)}`);
+          const reason = idleReconnect ? "idle" : error instanceof Error ? error.message : String(error);
+          console.error(`\nLog stream disconnected; reconnecting. ${reason}`);
           await sleep(2_000);
         }
+      } finally {
+        if (idleTimer) clearTimeout(idleTimer);
+        logsAbort.signal.removeEventListener("abort", abortStream);
       }
       if (!finished && !logsAbort.signal.aborted) await sleep(1_000);
     }
