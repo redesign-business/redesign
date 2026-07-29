@@ -5,7 +5,7 @@ const [cmd = "help", ...rest] = process.argv.slice(2);
 const usage = [
   "Usage:",
   "  npm run redesign <url> [--slug <slug>] [--model <model>] [--agent-id <id>] [--keep-sandbox]",
-  "  npm run hybrid <url> [--slug <slug>] [--research-model <model>] [--design-model <model>] [--implementation-model <model>] [--agent-id <id>] [--keep-sandbox]",
+  "  npm run hybrid <url> [--slug <slug>] [--research-model <model>] [--draft-model <model>] [--implementation-model <model>] [--agent-id <id>] [--keep-sandbox]",
   "  npm run continue -- --metrics <path> [--agent-id <id>]",
   "  npm run logs -- --sandbox <sandbox> --command <command>",
   "  npm run stop -- --sandbox <sandbox>",
@@ -55,6 +55,7 @@ try {
       site,
       slug: args.get("slug"),
       researchModel: args.get("research-model"),
+      draftModel: args.get("draft-model"),
       designModel: args.get("design-model"),
       implementationModel: args.get("implementation-model"),
       buildModel: args.get("build-model"),

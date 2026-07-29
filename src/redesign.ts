@@ -19,6 +19,7 @@ export type RedesignOptions = {
 
 export type HybridRedesignOptions = Omit<RedesignOptions, "model"> & {
   researchModel?: string;
+  draftModel?: string;
   designModel?: string;
   implementationModel?: string;
   buildModel?: string;
@@ -76,7 +77,7 @@ const OPENCODE_BIN = "/home/vercel-sandbox/.opencode/node_modules/.bin/opencode"
 const WORKDIR = "/vercel/sandbox";
 const DEFAULT_MODEL = "deepseek/deepseek-v4-pro";
 const DEFAULT_RESEARCH_MODEL = "deepseek/deepseek-v4-pro";
-const DEFAULT_DESIGN_MODEL = "openai/gpt-5.6-sol";
+const DEFAULT_DRAFT_MODEL = "openai/gpt-5.6-sol";
 const DEFAULT_IMPLEMENTATION_MODEL = "deepseek/deepseek-v4-pro";
 const DEFAULT_GITHUB_OWNER = "redesign-business";
 const DEFAULT_BASE_DOMAIN = "redesign.business";
@@ -165,6 +166,7 @@ export function resolveAgentId(agentId: string | undefined) {
 }
 
 function modelForContinue(previous: RunMetrics) {
+  if (previous.phase === "draft" && typeof previous.draftModel === "string") return gatewayModelFromInput(previous.draftModel);
   if (previous.phase === "design" && typeof previous.designModel === "string") return gatewayModelFromInput(previous.designModel);
   if (previous.phase === "implementation" && typeof previous.implementationModel === "string") return gatewayModelFromInput(previous.implementationModel);
   if (typeof previous.buildModel === "string") return gatewayModelFromInput(previous.buildModel);
@@ -236,29 +238,32 @@ export function buildResearchPrompt(options: {
   ].join("\n");
 }
 
-export function buildDesignPrompt(options: {
+export function buildDraftPrompt(options: {
   site: string;
   slug: string;
   repoUrl: string;
 }) {
   return [
-    "Use proof.md as the handoff context.",
+    "Build the first draft of the website from proof.md, raw.md, and images/.",
+    "",
+    "Use this local skill file:",
+    "1. .opencode/skills/nextjs-site-building/SKILL.md",
     "",
     `Project slug: ${options.slug}`,
     `GitHub repo: ${options.repoUrl}`,
     `Original URL: ${options.site}`,
     "",
     "Task:",
-    "Create design.md. Do not build the site. Do not deploy.",
     "First make sure the current repo has the latest main from GitHub.",
-    "The goal is a tasteful presentation of the proof in this standard landing-page order: nav, hero, several proof sections, FAQ, final CTA, footer.",
-    "Design system must include: one font or separate heading/body fonts, neutral palette, primary color, optional secondary color, spacing, border radius, borders yes/no, shadows yes/no, motion/animation usage, and icon library.",
-    "Composition must include concrete descriptions of the layout for the nav, hero, proof sections, FAQ, final CTA, footer, and any useful proof-focused band below the hero.",
-    "Use the business's demonstrated proof from proof.md to inspire the visual hierarchy and section ideas. Do not invent proof.",
-    "Commit and push design.md to main.",
+    "Build the site. Use the business's unique proof and project imagery to inspire the design.",
+    "Typical structure: nav, hero, several proof sections, FAQ, final CTA, footer.",
+    "No text-only sections except nav, banners, the bar below hero, and footer. Do not repeat images or other media. There is one CTA; use it everywhere.",
+    "Automated tests are out of scope for this pilot. Run only the basic production build needed to prove the draft compiles.",
+    "Commit and push the first complete site to main with: feat: build landing page",
+    "Do not run the refine-landing-page pass. Do not run the web-quality-audit pass. Do not deploy.",
     "Never print secrets, tokens, full environment variables, credential helper output, or auth headers.",
     "",
-    "You are done when design.md exists and main is pushed to GitHub.",
+    "You are done when the first complete site is pushed to GitHub.",
   ].join("\n");
 }
 
@@ -269,12 +274,11 @@ export function buildSitePrompt(options: {
   expectedRedesignUrl: string;
 }) {
   return [
-    "Build the website from the existing handoff files: design.md, proof.md, raw.md, and images/.",
+    "Refine, audit, and deploy the existing first-draft website.",
     "",
     "Use these local skill files in order:",
-    "1. .opencode/skills/nextjs-site-building/SKILL.md",
-    "2. .opencode/skills/refine-landing-page/SKILL.md",
-    "3. .opencode/skills/web-quality-audit/SKILL.md",
+    "1. .opencode/skills/refine-landing-page/SKILL.md",
+    "2. .opencode/skills/web-quality-audit/SKILL.md",
     "",
     `Project slug: ${options.slug}`,
     `GitHub repo: ${options.repoUrl}`,
@@ -283,13 +287,12 @@ export function buildSitePrompt(options: {
     "",
     "Task:",
     "First make sure the current repo has the latest main from GitHub.",
-    "Use design.md as the design handoff. Use proof.md as the content/proof source of truth. Use raw.md and images/ only as supporting source material.",
-    "3) Build the site. Use the business's unique data to inspire the design. Typical structure: nav, hero, several proof sections, FAQ, final CTA, footer. No text-only sections except nav, banners, the bar below hero, and footer. Do not repeat images or other media. There is one CTA; use it everywhere.",
-    "4) Run the refine-landing-page pass.",
-    "5) Run the web-quality-audit pass.",
+    "Use proof.md as the content/proof source of truth. Use raw.md and images/ only as supporting source material.",
+    "Do not redesign from scratch. Improve the existing first draft.",
+    "Run the refine-landing-page pass.",
+    "Run the web-quality-audit pass.",
     "Automated tests are out of scope for this pilot. Run only the basic production build needed to deploy.",
     "Commit and push to main after each major phase, using this history:",
-    "   - after the first complete site: feat: build landing page",
     "   - after the refine pass: fix: refine landing page",
     "   - after the audit/build pass: chore: pass audit and build",
     "   If a push fails, stop and fix Git auth before continuing.",
@@ -584,6 +587,7 @@ export async function refreshUsage(metricsPath: string) {
     model: string;
     status?: string;
     researchModel?: string;
+    draftModel?: string;
     designModel?: string;
     implementationModel?: string;
     buildModel?: string;
@@ -596,7 +600,7 @@ export async function refreshUsage(metricsPath: string) {
   if (!metrics.sandbox) throw new Error("Metrics file is missing sandbox");
 
   const sandbox = await Sandbox.get({ name: metrics.sandbox });
-  const models = [metrics.researchModel, metrics.designModel, metrics.implementationModel, metrics.buildModel]
+  const models = [metrics.researchModel, metrics.draftModel, metrics.designModel, metrics.implementationModel, metrics.buildModel]
     .filter((model): model is string => typeof model === "string");
   if (models.length) {
     const usageByModel = await estimateOpenCodeUsage(sandbox, [...new Set(models)]);
@@ -1114,9 +1118,9 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
   const originalUrl = normalizeHttpUrl(options.site);
   const slug = normalizeSlug(options.slug ?? `${slugFromUrl(originalUrl)}-deepseek-sol-deepseek`);
   const researchModel = gatewayModelFromInput(options.researchModel ?? DEFAULT_RESEARCH_MODEL);
-  const designModel = gatewayModelFromInput(options.designModel ?? options.buildModel ?? DEFAULT_DESIGN_MODEL);
+  const draftModel = gatewayModelFromInput(options.draftModel ?? options.designModel ?? options.buildModel ?? DEFAULT_DRAFT_MODEL);
   const implementationModel = gatewayModelFromInput(options.implementationModel ?? DEFAULT_IMPLEMENTATION_MODEL);
-  const usageModels = [...new Set([researchModel, designModel, implementationModel])];
+  const usageModels = [...new Set([researchModel, draftModel, implementationModel])];
   const baseDomain = process.env.REDESIGN_BASE_DOMAIN ?? DEFAULT_BASE_DOMAIN;
   const expectedRedesignUrl = `https://${slug}.${baseDomain}`;
   const githubToken = process.env.GITHUB_TOKEN;
@@ -1137,7 +1141,7 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
     originalUrl,
     repoUrl: "",
     expectedRedesignUrl,
-    model: `${researchModel} + ${designModel} + ${implementationModel}`,
+    model: `${researchModel} + ${draftModel} + ${implementationModel}`,
     aiGatewayBudget: aiGatewayKey.budget,
     metricsPath,
     agentId,
@@ -1210,8 +1214,8 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
         content: Buffer.from(buildResearchPrompt({ site: originalUrl, slug, repoUrl: repo.htmlUrl })),
       },
       {
-        path: "/tmp/design-prompt.md",
-        content: Buffer.from(buildDesignPrompt({ site: originalUrl, slug, repoUrl: repo.htmlUrl })),
+        path: "/tmp/draft-prompt.md",
+        content: Buffer.from(buildDraftPrompt({ site: originalUrl, slug, repoUrl: repo.htmlUrl })),
       },
       {
         path: "/tmp/site-prompt.md",
@@ -1227,7 +1231,7 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
       status: "running",
       phase: "research",
       researchModel,
-      designModel,
+      draftModel,
       implementationModel,
     });
 
@@ -1250,22 +1254,22 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
       aiGatewayKeyName: aiGatewayKey.name,
       startedAt: new Date(startMs).toISOString(),
       status: "running",
-      phase: "design",
+      phase: "draft",
       researchModel,
-      designModel,
+      draftModel,
       implementationModel,
       researchCommand: research.cmdId,
     });
 
-    const design = await sandbox.runCommand({
+    const draft = await sandbox.runCommand({
       cmd: OPENCODE_BIN,
-      args: ["run", "git pull --ff-only && follow the attached design prompt.", "--auto", "--dir", WORKDIR, "--title", `Design ${slug}`, "--model", opencodeModelForGatewayModel(designModel), "--file", "/tmp/design-prompt.md"],
+      args: ["run", "git pull --ff-only && follow the attached first-draft prompt.", "--auto", "--dir", WORKDIR, "--title", `Draft ${slug}`, "--model", opencodeModelForGatewayModel(draftModel), "--file", "/tmp/draft-prompt.md"],
       detached: true,
     });
-    result.command = design.cmdId;
-    const designRun = await streamUntilFinished(design, startMs);
-    if (designRun.finished.exitCode !== 0) {
-      throw new Error(`Design phase failed with exit code ${designRun.finished.exitCode}\n${outputTail(designRun.output)}`);
+    result.command = draft.cmdId;
+    const draftRun = await streamUntilFinished(draft, startMs);
+    if (draftRun.finished.exitCode !== 0) {
+      throw new Error(`Draft phase failed with exit code ${draftRun.finished.exitCode}\n${outputTail(draftRun.output)}`);
     }
 
     await writeRunMetrics(metricsPath, {
@@ -1276,10 +1280,10 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
       status: "running",
       phase: "implementation",
       researchModel,
-      designModel,
+      draftModel,
       implementationModel,
       researchCommand: research.cmdId,
-      designCommand: design.cmdId,
+      draftCommand: draft.cmdId,
     });
 
     const build = await sandbox.runCommand({
@@ -1310,10 +1314,10 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
       status: "succeeded",
       redesignUrl,
       researchModel,
-      designModel,
+      draftModel,
       implementationModel,
       researchCommand: research.cmdId,
-      designCommand: design.cmdId,
+      draftCommand: draft.cmdId,
       implementationCommand: build.cmdId,
       estimatedUsageByModel: usageByModel,
       estimatedUsageTables: usageTables,
@@ -1358,7 +1362,7 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
       wallTimeSeconds: Math.round((endMs - startMs) / 1000),
       status: "failed",
       researchModel,
-      designModel,
+      draftModel,
       implementationModel,
       estimatedUsageByModel: usageByModel,
       estimatedTotalUsage: usageByModel ? sumUsage(usageByModel) : undefined,

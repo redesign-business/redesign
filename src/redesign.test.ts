@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {
   aliasHostForRedesignUrl,
   appendWithoutReplay,
-  buildDesignPrompt,
+  buildDraftPrompt,
   buildPrompt,
   buildResearchPrompt,
   buildSitePrompt,
@@ -67,16 +67,16 @@ assert.match(researchPrompt, /2\) Make a proof\.md/);
 assert.match(researchPrompt, /Stop after step 2/);
 assert.doesNotMatch(researchPrompt, /Build the site/);
 
-const designPrompt = buildDesignPrompt({
+const draftPrompt = buildDraftPrompt({
   site: "https://acme.test/",
   slug: "acme",
   repoUrl: "https://github.com/redesign-business/acme",
 });
-assert.match(designPrompt, /Use proof\.md as the handoff context/);
-assert.match(designPrompt, /Create design\.md/);
-assert.match(designPrompt, /Design system must include/);
-assert.match(designPrompt, /Composition must include/);
-assert.match(designPrompt, /Do not build the site/);
+assert.match(draftPrompt, /Build the first draft/);
+assert.match(draftPrompt, /\.opencode\/skills\/nextjs-site-building\/SKILL\.md/);
+assert.match(draftPrompt, /feat: build landing page/);
+assert.match(draftPrompt, /Do not run the refine-landing-page pass/);
+assert.match(draftPrompt, /Do not deploy/);
 
 const sitePrompt = buildSitePrompt({
   site: "https://acme.test/",
@@ -84,11 +84,11 @@ const sitePrompt = buildSitePrompt({
   repoUrl: "https://github.com/redesign-business/acme",
   expectedRedesignUrl: "https://acme.redesign.business",
 });
-assert.match(sitePrompt, /Build the website from the existing handoff files: design\.md, proof\.md, raw\.md, and images\//);
-assert.match(sitePrompt, /Use design\.md as the design handoff/);
-assert.match(sitePrompt, /3\) Build the site/);
-assert.match(sitePrompt, /4\) Run the refine-landing-page pass/);
-assert.match(sitePrompt, /5\) Run the web-quality-audit pass/);
+assert.match(sitePrompt, /Refine, audit, and deploy the existing first-draft website/);
+assert.match(sitePrompt, /Do not redesign from scratch/);
+assert.match(sitePrompt, /Run the refine-landing-page pass/);
+assert.match(sitePrompt, /Run the web-quality-audit pass/);
+assert.doesNotMatch(sitePrompt, /nextjs-site-building/);
 assert.match(sitePrompt, /You are done when you have a URL to the landing page/);
 
 assert.equal(extractRedesignUrl("Original URL: https://old.test\nRedesign URL: https://new.test"), "https://new.test");
