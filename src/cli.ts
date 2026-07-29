@@ -1,9 +1,10 @@
-import { cleanupSandbox, commandOutput, continueRedesign, parseArgs, readRequired, refreshUsage, runRedesign } from "./redesign.js";
+import { cleanupSandbox, commandOutput, continueRedesign, parseArgs, readRequired, refreshUsage, runHybridRedesign, runRedesign } from "./redesign.js";
 
 const [cmd = "help", ...rest] = process.argv.slice(2);
 const usage = [
   "Usage:",
   "  npm run redesign <url> [--slug <slug>] [--model <model>] [--keep-sandbox]",
+  "  npm run hybrid <url> [--slug <slug>] [--research-model <model>] [--build-model <model>] [--keep-sandbox]",
   "  npm run continue -- --metrics <path>",
   "  npm run logs -- --sandbox <sandbox> --command <command>",
   "  npm run stop -- --sandbox <sandbox>",
@@ -26,6 +27,18 @@ try {
       site,
       slug: args.get("slug"),
       model: args.get("model"),
+      keepSandbox: args.get("keep-sandbox") === "true",
+      timeoutMinutes: args.has("timeout") ? Number(args.get("timeout")) : undefined,
+    });
+  } else if (cmd === "hybrid") {
+    const site = positional[0] ?? args.get("site");
+    if (!site) throw new Error("Missing site URL");
+
+    await runHybridRedesign({
+      site,
+      slug: args.get("slug"),
+      researchModel: args.get("research-model"),
+      buildModel: args.get("build-model"),
       keepSandbox: args.get("keep-sandbox") === "true",
       timeoutMinutes: args.has("timeout") ? Number(args.get("timeout")) : undefined,
     });

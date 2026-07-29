@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import {
   aliasHostForRedesignUrl,
   buildPrompt,
+  buildResearchPrompt,
+  buildSitePrompt,
   extractRedesignUrl,
   formatUsageTable,
   gatewayModelFromInput,
@@ -49,6 +51,28 @@ assert.match(prompt, /feat: build landing page/);
 assert.match(prompt, /Add acme\.redesign\.business to the acme Vercel project/);
 assert.match(prompt, /final Redesign URL must be https:\/\/acme\.redesign\.business/);
 assert.match(prompt, /Never print secrets/);
+
+const researchPrompt = buildResearchPrompt({
+  site: "https://acme.test/",
+  slug: "acme",
+  repoUrl: "https://github.com/redesign-business/acme",
+});
+assert.match(researchPrompt, /1\) Scrape the URL for copy and images/);
+assert.match(researchPrompt, /2\) Make a proof\.md/);
+assert.match(researchPrompt, /Stop after step 2/);
+assert.doesNotMatch(researchPrompt, /Build the site/);
+
+const sitePrompt = buildSitePrompt({
+  site: "https://acme.test/",
+  slug: "acme",
+  repoUrl: "https://github.com/redesign-business/acme",
+  expectedRedesignUrl: "https://acme.redesign.business",
+});
+assert.match(sitePrompt, /Use raw\.md, proof\.md, and images\/ as the handoff/);
+assert.match(sitePrompt, /3\) Build the site/);
+assert.match(sitePrompt, /4\) Run the refine-landing-page pass/);
+assert.match(sitePrompt, /5\) Run the web-quality-audit pass/);
+assert.match(sitePrompt, /You are done when you have a URL to the landing page/);
 
 assert.equal(extractRedesignUrl("Original URL: https://old.test\nRedesign URL: https://new.test"), "https://new.test");
 assert.equal(extractRedesignUrl("nothing here"), undefined);

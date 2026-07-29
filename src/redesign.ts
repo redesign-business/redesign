@@ -15,6 +15,11 @@ export type RedesignOptions = {
   keepSandbox?: boolean;
 };
 
+export type HybridRedesignOptions = Omit<RedesignOptions, "model"> & {
+  researchModel?: string;
+  buildModel?: string;
+};
+
 export type RedesignResult = {
   sandbox: string;
   command: string;
@@ -28,6 +33,7 @@ export type RedesignResult = {
 };
 
 type AiGatewayUsage = {
+  model?: string;
   totalCost: number;
   marketCost: number;
   inputTokens: number;
@@ -63,6 +69,8 @@ type RunMetrics = RedesignResult & {
 const OPENCODE_BIN = "/home/vercel-sandbox/.opencode/node_modules/.bin/opencode";
 const WORKDIR = "/vercel/sandbox";
 const DEFAULT_MODEL = "deepseek/deepseek-v4-pro";
+const DEFAULT_RESEARCH_MODEL = "deepseek/deepseek-v4-pro";
+const DEFAULT_BUILD_MODEL = "openai/gpt-5.6-sol";
 const DEFAULT_GITHUB_OWNER = "redesign-business";
 const DEFAULT_BASE_DOMAIN = "redesign.business";
 const DEFAULT_AI_GATEWAY_BUDGET = 1;
@@ -186,6 +194,68 @@ export function buildPrompt(options: {
   ].join("\n");
 }
 
+export function buildResearchPrompt(options: {
+  site: string;
+  slug: string;
+  repoUrl: string;
+}) {
+  return [
+    `redesign ${options.site}.`,
+    "",
+    `Project slug: ${options.slug}`,
+    `GitHub repo: ${options.repoUrl}`,
+    `Original URL: ${options.site}`,
+    "",
+    "Task:",
+    "1) Scrape the URL for copy and images. Put copy in raw.md and images in an images directory.",
+    "2) Make a proof.md that directly copies and organizes all the business's demonstrated proof from raw.md. Examples of demonstrated proof are completed work, testimonials, awards, statistics, guarantees, credentials, press, partnerships, and anything the business has or has done that makes a potential customer trust them. Do not invent proof.",
+    "Stop after step 2. Do not build the site. Do not deploy.",
+    "Commit and push to main after raw.md/images, then again after proof.md.",
+    "Never print secrets, tokens, full environment variables, credential helper output, or auth headers.",
+    "",
+    "You are done when raw.md, proof.md, and images/ exist and main is pushed to GitHub.",
+  ].join("\n");
+}
+
+export function buildSitePrompt(options: {
+  site: string;
+  slug: string;
+  repoUrl: string;
+  expectedRedesignUrl: string;
+}) {
+  return [
+    "Build the website from the existing handoff files: raw.md, proof.md, and images/.",
+    "",
+    "Use these local skill files in order:",
+    "1. .opencode/skills/nextjs-site-building/SKILL.md",
+    "2. .opencode/skills/refine-landing-page/SKILL.md",
+    "3. .opencode/skills/web-quality-audit/SKILL.md",
+    "",
+    `Project slug: ${options.slug}`,
+    `GitHub repo: ${options.repoUrl}`,
+    `Original URL: ${options.site}`,
+    `Preferred redesign URL: ${options.expectedRedesignUrl}`,
+    "",
+    "Task:",
+    "Use raw.md, proof.md, and images/ as the handoff from steps 1-2.",
+    "3) Build the site. Use the business's unique data to inspire the design. Typical structure: nav, hero, several proof sections, FAQ, final CTA, footer. No text-only sections except nav, banners, the bar below hero, and footer. Do not repeat images or other media. There is one CTA; use it everywhere.",
+    "4) Run the refine-landing-page pass.",
+    "5) Run the web-quality-audit pass.",
+    "Automated tests are out of scope for this pilot. Run only the basic production build needed to deploy.",
+    "Commit and push to main after each major phase, using this history:",
+    "   - after the first complete site: feat: build landing page",
+    "   - after the refine pass: fix: refine landing page",
+    "   - after the audit/build pass: chore: pass audit and build",
+    "   If a push fails, stop and fix Git auth before continuing.",
+    "Deploy intentionally exactly once with the Vercel CLI after the site is finished. Use the slug as the Vercel project name.",
+    `Add ${new URL(options.expectedRedesignUrl).host} to the ${options.slug} Vercel project, then alias the final deployment to ${options.expectedRedesignUrl} with the Vercel CLI. The final Redesign URL must be ${options.expectedRedesignUrl}, not a vercel.app URL.`,
+    "Never print secrets, tokens, full environment variables, credential helper output, or auth headers.",
+    "",
+    "You are done when you have a URL to the landing page.",
+    "At the very end, print a short final block with Original URL, Redesign URL, GitHub repo, and slug.",
+  ].join("\n");
+}
+
 export function extractRedesignUrl(output: string) {
   const matches = [...output.matchAll(/Redesign URL:\s*(https?:\/\/[^\s]+)/gi)];
   return matches.at(-1)?.[1];
@@ -270,6 +340,35 @@ export function formatUsageTable(rows: UsageCostRow[]) {
   return lines.join("\n");
 }
 
+async function usageTablesByModel(usages: AiGatewayUsage[]) {
+  return Promise.all(usages.map(async (usage) => {
+    const pricing = await modelPricing(usage.model ?? "");
+    return { usage, pricing, rows: usageCostRows(usage, pricing) };
+  }));
+}
+
+function sumUsage(usages: AiGatewayUsage[]) {
+  return usages.reduce((sum, usage) => ({
+    totalCost: sum.totalCost + usage.totalCost,
+    marketCost: sum.marketCost + usage.marketCost,
+    inputTokens: sum.inputTokens + usage.inputTokens,
+    outputTokens: sum.outputTokens + usage.outputTokens,
+    cachedInputTokens: sum.cachedInputTokens + usage.cachedInputTokens,
+    cacheCreationInputTokens: sum.cacheCreationInputTokens + usage.cacheCreationInputTokens,
+    reasoningTokens: sum.reasoningTokens + usage.reasoningTokens,
+    requestCount: sum.requestCount + usage.requestCount,
+  }), {
+    totalCost: 0,
+    marketCost: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedInputTokens: 0,
+    cacheCreationInputTokens: 0,
+    reasoningTokens: 0,
+    requestCount: 0,
+  } satisfies AiGatewayUsage);
+}
+
 function utcDate(ms: number) {
   return new Date(ms).toISOString().slice(0, 10);
 }
@@ -314,11 +413,62 @@ async function queryAiGatewayUsage(apiKey: string, apiKeyName: string, startMs: 
   } satisfies AiGatewayUsage;
 }
 
+async function queryAiGatewayUsageByModel(apiKey: string, startMs: number, endMs: number) {
+  const params = new URLSearchParams({
+    start_date: utcDate(startMs),
+    end_date: utcDate(endMs),
+    group_by: "model",
+  });
+
+  const response = await fetch(`https://ai-gateway.vercel.sh/v1/report?${params}`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (!response.ok) return undefined;
+
+  const json = await response.json() as {
+    results?: Array<{
+      model?: string;
+      total_cost?: number;
+      market_cost?: number;
+      input_tokens?: number;
+      output_tokens?: number;
+      cached_input_tokens?: number;
+      cache_creation_input_tokens?: number;
+      reasoning_tokens?: number;
+      request_count?: number;
+    }>;
+  };
+
+  const rows = json.results?.filter((row) => row.model).map((row) => ({
+    model: row.model,
+    totalCost: row.total_cost ?? 0,
+    marketCost: row.market_cost ?? 0,
+    inputTokens: row.input_tokens ?? 0,
+    outputTokens: row.output_tokens ?? 0,
+    cachedInputTokens: row.cached_input_tokens ?? 0,
+    cacheCreationInputTokens: row.cache_creation_input_tokens ?? 0,
+    reasoningTokens: row.reasoning_tokens ?? 0,
+    requestCount: row.request_count ?? 0,
+  } satisfies AiGatewayUsage));
+
+  return rows?.length ? rows : undefined;
+}
+
 async function waitForAiGatewayUsage(apiKey: string, apiKeyName: string, startMs: number, endMs: number) {
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const usage = await queryAiGatewayUsage(apiKey, apiKeyName, startMs, endMs);
     if (usage) return usage;
     console.log(`Waiting for AI Gateway usage (${attempt + 1}/20)...`);
+    await new Promise((resolve) => setTimeout(resolve, 15_000));
+  }
+  return undefined;
+}
+
+async function waitForAiGatewayUsageByModel(apiKey: string, startMs: number, endMs: number) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const usage = await queryAiGatewayUsageByModel(apiKey, startMs, endMs);
+    if (usage) return usage;
+    console.log(`Waiting for AI Gateway model usage (${attempt + 1}/20)...`);
     await new Promise((resolve) => setTimeout(resolve, 15_000));
   }
   return undefined;
@@ -866,6 +1016,230 @@ export async function continueRedesign(previousMetricsPath: string): Promise<Red
       error: error instanceof Error ? error.message : String(error),
     });
     await deleteAiGatewayKey(aiGatewayKey.id);
+    throw error;
+  }
+}
+
+export async function runHybridRedesign(options: HybridRedesignOptions): Promise<RedesignResult> {
+  const originalUrl = normalizeHttpUrl(options.site);
+  const slug = normalizeSlug(options.slug ?? `${slugFromUrl(originalUrl)}-deepseek-sol`);
+  const researchModel = gatewayModelFromInput(options.researchModel ?? DEFAULT_RESEARCH_MODEL);
+  const buildModel = gatewayModelFromInput(options.buildModel ?? DEFAULT_BUILD_MODEL);
+  const baseDomain = process.env.REDESIGN_BASE_DOMAIN ?? DEFAULT_BASE_DOMAIN;
+  const expectedRedesignUrl = `https://${slug}.${baseDomain}`;
+  const githubToken = process.env.GITHUB_TOKEN;
+  const vercelToken = process.env.VERCEL_TOKEN ?? "";
+  const startMs = Date.now();
+  const metricsPath = join(process.cwd(), "runs", `${new Date(startMs).toISOString().replace(/[:.]/g, "-")}-${slug}.json`);
+
+  if (!githubToken) throw new Error("Missing GITHUB_TOKEN");
+
+  const aiGatewayKey = await createAiGatewayKey(slug);
+  let sandbox: Sandbox | undefined;
+
+  const result: RedesignResult = {
+    sandbox: "",
+    command: "",
+    slug,
+    originalUrl,
+    repoUrl: "",
+    expectedRedesignUrl,
+    model: `${researchModel} + ${buildModel}`,
+    aiGatewayBudget: aiGatewayKey.budget,
+    metricsPath,
+  };
+
+  try {
+    const repo = await createGithubRepo(slug);
+    result.repoUrl = repo.htmlUrl;
+    sandbox = await Sandbox.create({
+      name: makeSandboxName(slug),
+      runtime: "node24",
+      source: { type: "git", url: repo.cloneUrl, username: "x-access-token", password: githubToken, depth: 1 },
+      timeout: (options.timeoutMinutes ?? 90) * 60 * 1000,
+      resources: { vcpus: 2 },
+      env: {
+        AI_GATEWAY_API_KEY: aiGatewayKey.key,
+        GITHUB_TOKEN: githubToken,
+        GIT_USERNAME: "x-access-token",
+        GIT_PASSWORD: githubToken,
+        GH_TOKEN: githubToken,
+        VERCEL_TOKEN: vercelToken,
+        VERCEL_TEAM_ID: process.env.VERCEL_TEAM_ID ?? "",
+        OPENCODE_DISABLE_AUTOUPDATE: "true",
+        OPENCODE_DISABLE_MODELS_FETCH: "true",
+      },
+      tags: { app: "redesign-hosted-2", slug },
+    });
+    result.sandbox = sandbox.name;
+
+    await must(await sandbox.runCommand("npm", ["install", "--prefix", "/home/vercel-sandbox/.opencode", "opencode-ai@1.18.9"]), "OpenCode install");
+    await must(await sandbox.runCommand({
+      cmd: "bash",
+      args: ["-lc", [
+        "git config user.name redesign-hosted-2",
+        "git config user.email redesign-hosted-2@users.noreply.github.com",
+        "git config credential.helper '!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f'",
+        "git ls-remote origin HEAD >/dev/null",
+      ].join(" && ")],
+      env: { GITHUB_TOKEN: githubToken },
+    }), "git setup");
+
+    await must(await sandbox.runCommand("mkdir", [
+      "-p",
+      `${WORKDIR}/.opencode/skills/nextjs-site-building`,
+      `${WORKDIR}/.opencode/skills/refine-landing-page`,
+      `${WORKDIR}/.opencode/skills/web-quality-audit`,
+      "/home/vercel-sandbox/.config/opencode",
+    ]), "mkdir");
+
+    await sandbox.writeFiles([
+      ...(await localSkillCopies()),
+      {
+        path: "/home/vercel-sandbox/.config/opencode/opencode.json",
+        content: Buffer.from(JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+          enabled_providers: ["vercel"],
+          model: opencodeModelForGatewayModel(researchModel),
+          provider: {
+            vercel: {
+              npm: "@ai-sdk/gateway",
+              env: ["AI_GATEWAY_API_KEY"],
+              options: { apiKey: "{env:AI_GATEWAY_API_KEY}" },
+              models: { [researchModel]: {}, [buildModel]: {} },
+            },
+          },
+        }, null, 2)),
+      },
+      {
+        path: "/tmp/research-prompt.md",
+        content: Buffer.from(buildResearchPrompt({ site: originalUrl, slug, repoUrl: repo.htmlUrl })),
+      },
+      {
+        path: "/tmp/site-prompt.md",
+        content: Buffer.from(buildSitePrompt({ site: originalUrl, slug, repoUrl: repo.htmlUrl, expectedRedesignUrl })),
+      },
+    ]);
+
+    await writeRunMetrics(metricsPath, {
+      ...result,
+      aiGatewayKeyId: aiGatewayKey.id,
+      aiGatewayKeyName: aiGatewayKey.name,
+      startedAt: new Date(startMs).toISOString(),
+      status: "running",
+      phase: "research",
+      researchModel,
+      buildModel,
+    });
+
+    console.log(JSON.stringify(result, null, 2));
+
+    const research = await sandbox.runCommand({
+      cmd: OPENCODE_BIN,
+      args: ["run", "Follow the attached redesign prompt.", "--auto", "--dir", WORKDIR, "--title", `Research ${slug}`, "--model", opencodeModelForGatewayModel(researchModel), "--file", "/tmp/research-prompt.md"],
+      detached: true,
+    });
+    result.command = research.cmdId;
+    const researchRun = await streamUntilFinished(research, startMs);
+    if (researchRun.finished.exitCode !== 0) {
+      throw new Error(`Research phase failed with exit code ${researchRun.finished.exitCode}\n${outputTail(researchRun.output)}`);
+    }
+
+    await writeRunMetrics(metricsPath, {
+      ...result,
+      aiGatewayKeyId: aiGatewayKey.id,
+      aiGatewayKeyName: aiGatewayKey.name,
+      startedAt: new Date(startMs).toISOString(),
+      status: "running",
+      phase: "build",
+      researchModel,
+      buildModel,
+      researchCommand: research.cmdId,
+    });
+
+    const build = await sandbox.runCommand({
+      cmd: OPENCODE_BIN,
+      args: ["run", "Follow the attached redesign prompt.", "--auto", "--dir", WORKDIR, "--title", `Build ${slug}`, "--model", opencodeModelForGatewayModel(buildModel), "--file", "/tmp/site-prompt.md"],
+      detached: true,
+    });
+    result.command = build.cmdId;
+    const buildRun = await streamUntilFinished(build, startMs);
+    if (buildRun.finished.exitCode !== 0) {
+      throw new Error(`Build phase failed with exit code ${buildRun.finished.exitCode}\n${outputTail(buildRun.output)}`);
+    }
+
+    const redesignUrl = await aliasRedesignUrl(extractRedesignUrl(buildRun.output), expectedRedesignUrl, slug);
+    const endMs = Date.now();
+    const wallTimeSeconds = Math.round((endMs - startMs) / 1000);
+    const usageByModel = await waitForAiGatewayUsageByModel(aiGatewayKey.key, startMs, endMs);
+    const usageTables = usageByModel ? await usageTablesByModel(usageByModel) : undefined;
+    const totalUsage = usageByModel ? sumUsage(usageByModel) : undefined;
+
+    await writeRunMetrics(metricsPath, {
+      ...result,
+      aiGatewayKeyId: aiGatewayKey.id,
+      aiGatewayKeyName: aiGatewayKey.name,
+      startedAt: new Date(startMs).toISOString(),
+      endedAt: new Date(endMs).toISOString(),
+      wallTimeSeconds,
+      status: "succeeded",
+      redesignUrl,
+      researchModel,
+      buildModel,
+      researchCommand: research.cmdId,
+      buildCommand: build.cmdId,
+      usageByModel,
+      usageTables,
+      totalUsage,
+      aiGatewayKeyDeletedAt: usageByModel ? new Date().toISOString() : undefined,
+    });
+
+    if (options.keepSandbox) await sandbox.stop();
+    else await sandbox.delete();
+
+    console.log(`\nOriginal URL: ${originalUrl}`);
+    console.log(`Redesign URL: ${redesignUrl}`);
+    console.log(`GitHub repo: ${repo.htmlUrl}`);
+    console.log(`Slug: ${slug}`);
+    console.log(`Wall time: ${wallTimeSeconds}s`);
+    if (usageTables && totalUsage) {
+      for (const table of usageTables) {
+        console.log(`\nModel: ${table.usage.model}`);
+        console.log(formatUsageTable(table.rows));
+        console.log(`Requests: ${table.usage.requestCount}`);
+        console.log(`Vercel reported total: ${money(table.usage.totalCost)}`);
+      }
+      console.log(`\nCombined requests: ${totalUsage.requestCount}`);
+      console.log(`Combined Vercel reported total: ${money(totalUsage.totalCost)}`);
+    } else {
+      console.log("AI Gateway model usage: unavailable after waiting 5 minutes");
+      console.log("AI Gateway key kept for later usage refresh.");
+    }
+    console.log(`AI Gateway budget: $${aiGatewayKey.budget}`);
+    console.log(`Metrics: ${metricsPath}`);
+
+    if (usageByModel) await deleteAiGatewayKey(aiGatewayKey.id);
+    return result;
+  } catch (error) {
+    const endMs = Date.now();
+    const usageByModel = await waitForAiGatewayUsageByModel(aiGatewayKey.key, startMs, endMs);
+    await writeRunMetrics(metricsPath, {
+      ...result,
+      aiGatewayKeyId: aiGatewayKey.id,
+      aiGatewayKeyName: aiGatewayKey.name,
+      startedAt: new Date(startMs).toISOString(),
+      endedAt: new Date(endMs).toISOString(),
+      wallTimeSeconds: Math.round((endMs - startMs) / 1000),
+      status: "failed",
+      researchModel,
+      buildModel,
+      usageByModel,
+      totalUsage: usageByModel ? sumUsage(usageByModel) : undefined,
+      aiGatewayKeyDeletedAt: usageByModel ? new Date().toISOString() : undefined,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    if (usageByModel) await deleteAiGatewayKey(aiGatewayKey.id);
+    if (sandbox) console.error(`Sandbox left running for inspection: ${sandbox.name}`);
     throw error;
   }
 }
