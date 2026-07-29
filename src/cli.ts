@@ -1,12 +1,12 @@
 import { spawn } from "node:child_process";
-import { cleanupSandbox, commandOutput, continueRedesign, parseArgs, readRequired, refreshUsage, resumeAgent, runHybridRedesign, runRedesign } from "./redesign.js";
+import { cleanupSandbox, commandOutput, continueRedesign, parseArgs, readRequired, refreshUsage, runHybridRedesign, runRedesign } from "./redesign.js";
 
 const [cmd = "help", ...rest] = process.argv.slice(2);
 const usage = [
   "Usage:",
   "  npm run redesign <url> [--slug <slug>] [--model <model>] [--agent-id <id>] [--keep-sandbox]",
   "  npm run hybrid <url> [--slug <slug>] [--research-model <model>] [--build-model <model>] [--agent-id <id>] [--keep-sandbox]",
-  "  npm run continue -- --metrics <path>",
+  "  npm run continue -- --metrics <path> [--agent-id <id>]",
   "  npm run logs -- --sandbox <sandbox> --command <command>",
   "  npm run stop -- --sandbox <sandbox>",
   "  npm run usage -- --metrics <path>",
@@ -20,8 +20,8 @@ if (cmd === "help" || rest.includes("--help")) {
 const { args, positional } = parseArgs(rest);
 const agentId = args.get("agent-id");
 
-if ((cmd === "redesign" || cmd === "start" || cmd === "hybrid") && agentId && process.env.REDESIGN_AGENT_SUBPROCESS !== "1") {
-  const script = cmd === "hybrid" ? "hybrid" : "redesign";
+if ((cmd === "redesign" || cmd === "start" || cmd === "hybrid" || cmd === "continue") && agentId && process.env.REDESIGN_AGENT_SUBPROCESS !== "1") {
+  const script = cmd === "start" ? "redesign" : cmd;
   const child = spawn("npm", ["run", script, "--", ...rest], {
     cwd: process.cwd(),
     detached: true,
@@ -63,7 +63,7 @@ try {
   } else if (cmd === "logs") {
     console.log(await commandOutput(readRequired(args, "sandbox"), readRequired(args, "command")));
   } else if (cmd === "continue") {
-    await continueRedesign(readRequired(args, "metrics"));
+    await continueRedesign(readRequired(args, "metrics"), { agentId });
   } else if (cmd === "usage") {
     await refreshUsage(readRequired(args, "metrics"));
   } else if (cmd === "stop") {
@@ -75,10 +75,5 @@ try {
   }
 } catch (error) {
   console.error(error instanceof Error ? error.message : error);
-  resumeAgent(agentId, [
-    `The ${cmd} command failed before completing.`,
-    `Error: ${error instanceof Error ? error.message : String(error)}`,
-    "Please inspect the local runner state and decide the next recovery step.",
-  ].join("\n"));
   process.exitCode = 1;
 }

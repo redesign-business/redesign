@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { config as loadEnv } from "dotenv";
 import { Command, CommandFinished, Sandbox } from "@vercel/sandbox";
@@ -31,6 +32,7 @@ export type RedesignResult = {
   model: string;
   aiGatewayBudget: number;
   metricsPath: string;
+  agentId?: string;
 };
 
 type AiGatewayUsage = {
@@ -59,6 +61,7 @@ type ModelPricing = {
 };
 
 type RunMetrics = RedesignResult & {
+  agentId?: string;
   aiGatewayKeyId?: string;
   aiGatewayKeyName: string;
   startedAt: string;
@@ -151,6 +154,14 @@ export function gatewayModelFromInput(model: string) {
 
 export function opencodeModelForGatewayModel(model: string) {
   return `vercel/${gatewayModelFromInput(model)}`;
+}
+
+export function resolveAgentId(agentId: string | undefined) {
+  return agentId === "current" ? process.env.CODEX_THREAD_ID : agentId;
+}
+
+function modelForContinue(previous: RunMetrics) {
+  return gatewayModelFromInput(typeof previous.buildModel === "string" ? previous.buildModel : previous.model);
 }
 
 export function buildPrompt(options: {
@@ -277,24 +288,6 @@ function outputTail(output: string, maxChars = 4000) {
   return output.slice(Math.max(0, output.length - maxChars));
 }
 
-export function resumeAgent(agentId: string | undefined, prompt: string) {
-  const sessionId = agentId === "current" ? process.env.CODEX_THREAD_ID : agentId;
-  if (!sessionId) return;
-
-  try {
-    const child = spawn("codex", ["exec", "resume", "--skip-git-repo-check", sessionId, prompt], {
-      cwd: process.cwd(),
-      detached: true,
-      env: process.env,
-      stdio: "ignore",
-    });
-    child.on("error", () => {});
-    child.unref();
-  } catch {
-    // Best effort: the metrics file remains the source of truth.
-  }
-}
-
 async function streamUntilFinished(command: Command, startedAt: number) {
   const logsAbort = new AbortController();
   let output = "";
@@ -366,6 +359,16 @@ async function usageTablesByModel(usages: AiGatewayUsage[]) {
   }));
 }
 
+async function estimateUsageForModel(usage: AiGatewayUsage) {
+  const pricing = await modelPricing(usage.model ?? "");
+  const rows = usageCostRows(usage, pricing);
+  return {
+    ...usage,
+    totalCost: rows.at(-1)?.cost ?? 0,
+    marketCost: rows.at(-1)?.cost ?? 0,
+  };
+}
+
 function sumUsage(usages: AiGatewayUsage[]) {
   return usages.reduce((sum, usage) => ({
     totalCost: sum.totalCost + usage.totalCost,
@@ -388,109 +391,68 @@ function sumUsage(usages: AiGatewayUsage[]) {
   } satisfies AiGatewayUsage);
 }
 
-function utcDate(ms: number) {
-  return new Date(ms).toISOString().slice(0, 10);
+async function localCommandOutput(command: string, args: string[]) {
+  return new Promise<string>((resolve, reject) => {
+    const child = spawn(command, args);
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk; });
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (code: number | null) => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`${command} failed\n${stderr.trim()}`));
+    });
+  });
 }
 
-async function queryAiGatewayUsage(apiKey: string, apiKeyName: string, startMs: number, endMs: number) {
-  const params = new URLSearchParams({
-    start_date: utcDate(startMs),
-    end_date: utcDate(endMs),
-    group_by: "api_key_name",
-  });
+async function estimateOpenCodeUsage(sandbox: Sandbox, models?: string[]) {
+  const dir = await mkdtemp(join(tmpdir(), "redesign-opencode-"));
+  try {
+    const dbPath = join(dir, "opencode.db");
+    const downloaded = await sandbox.downloadFile(
+      { path: "/home/vercel-sandbox/.local/share/opencode/opencode.db" },
+      { path: dbPath },
+    );
+    if (!downloaded) return undefined;
 
-  const response = await fetch(`https://ai-gateway.vercel.sh/v1/report?${params}`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
-  });
-  if (!response.ok) return undefined;
-
-  const json = await response.json() as {
-    results?: Array<{
-      api_key_name?: string;
-      total_cost?: number;
-      market_cost?: number;
-      input_tokens?: number;
-      output_tokens?: number;
-      cached_input_tokens?: number;
-      cache_creation_input_tokens?: number;
-      reasoning_tokens?: number;
-      request_count?: number;
-    }>;
-  };
-  const row = json.results?.find((result) => result.api_key_name === apiKeyName);
-  if (!row) return undefined;
-
-  return {
-    totalCost: row.total_cost ?? 0,
-    marketCost: row.market_cost ?? 0,
-    inputTokens: row.input_tokens ?? 0,
-    outputTokens: row.output_tokens ?? 0,
-    cachedInputTokens: row.cached_input_tokens ?? 0,
-    cacheCreationInputTokens: row.cache_creation_input_tokens ?? 0,
-    reasoningTokens: row.reasoning_tokens ?? 0,
-    requestCount: row.request_count ?? 0,
-  } satisfies AiGatewayUsage;
-}
-
-async function queryAiGatewayUsageByModel(apiKey: string, startMs: number, endMs: number) {
-  const params = new URLSearchParams({
-    start_date: utcDate(startMs),
-    end_date: utcDate(endMs),
-    group_by: "model",
-  });
-
-  const response = await fetch(`https://ai-gateway.vercel.sh/v1/report?${params}`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
-  });
-  if (!response.ok) return undefined;
-
-  const json = await response.json() as {
-    results?: Array<{
+    const json = await localCommandOutput("sqlite3", ["-json", dbPath, [
+      "select json_extract(model,'$.id') as model,",
+      "sum(tokens_input) as input_tokens,",
+      "sum(tokens_output) as output_tokens,",
+      "sum(tokens_reasoning) as reasoning_tokens,",
+      "sum(tokens_cache_read) as cached_input_tokens,",
+      "sum(tokens_cache_write) as cache_creation_input_tokens,",
+      "count(*) as request_count",
+      "from session where model is not null group by 1",
+    ].join(" ")]);
+    const expected = models ? new Set(models) : undefined;
+    const rows = JSON.parse(json) as Array<{
       model?: string;
-      total_cost?: number;
-      market_cost?: number;
       input_tokens?: number;
       output_tokens?: number;
+      reasoning_tokens?: number;
       cached_input_tokens?: number;
       cache_creation_input_tokens?: number;
-      reasoning_tokens?: number;
       request_count?: number;
     }>;
-  };
-
-  const rows = json.results?.filter((row) => row.model).map((row) => ({
-    model: row.model,
-    totalCost: row.total_cost ?? 0,
-    marketCost: row.market_cost ?? 0,
-    inputTokens: row.input_tokens ?? 0,
-    outputTokens: row.output_tokens ?? 0,
-    cachedInputTokens: row.cached_input_tokens ?? 0,
-    cacheCreationInputTokens: row.cache_creation_input_tokens ?? 0,
-    reasoningTokens: row.reasoning_tokens ?? 0,
-    requestCount: row.request_count ?? 0,
-  } satisfies AiGatewayUsage));
-
-  return rows?.length ? rows : undefined;
-}
-
-async function waitForAiGatewayUsage(apiKey: string, apiKeyName: string, startMs: number, endMs: number) {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const usage = await queryAiGatewayUsage(apiKey, apiKeyName, startMs, endMs);
-    if (usage) return usage;
-    console.log(`Waiting for AI Gateway usage (${attempt + 1}/20)...`);
-    await new Promise((resolve) => setTimeout(resolve, 15_000));
+    const usage = await Promise.all(rows
+      .filter((row) => row.model && (!expected || expected.has(row.model)))
+      .map((row) => estimateUsageForModel({
+        model: row.model,
+        totalCost: 0,
+        marketCost: 0,
+        inputTokens: row.input_tokens ?? 0,
+        outputTokens: row.output_tokens ?? 0,
+        cachedInputTokens: row.cached_input_tokens ?? 0,
+        cacheCreationInputTokens: row.cache_creation_input_tokens ?? 0,
+        reasoningTokens: row.reasoning_tokens ?? 0,
+        requestCount: row.request_count ?? 0,
+      } satisfies AiGatewayUsage)));
+    return usage.length ? usage : undefined;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
-  return undefined;
-}
-
-async function waitForAiGatewayUsageByModel(apiKey: string, startMs: number, endMs: number) {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const usage = await queryAiGatewayUsageByModel(apiKey, startMs, endMs);
-    if (usage) return usage;
-    console.log(`Waiting for AI Gateway model usage (${attempt + 1}/20)...`);
-    await new Promise((resolve) => setTimeout(resolve, 15_000));
-  }
-  return undefined;
 }
 
 async function modelPricing(model: string) {
@@ -528,48 +490,76 @@ async function readRunMetrics(path: string) {
   return JSON.parse(await readFile(path, "utf8")) as RunMetrics;
 }
 
+function withoutReportedUsage<T extends Record<string, unknown>>(metrics: T) {
+  const rest = { ...metrics };
+  delete rest.usage;
+  delete rest.pricing;
+  delete rest.usageTable;
+  delete rest.usageByModel;
+  delete rest.usageTables;
+  delete rest.totalUsage;
+  return rest;
+}
+
 export async function refreshUsage(metricsPath: string) {
   const metrics = JSON.parse(await readFile(metricsPath, "utf8")) as {
+    sandbox: string;
     slug: string;
     model: string;
+    status?: string;
+    researchModel?: string;
+    buildModel?: string;
     aiGatewayKeyId?: string;
     aiGatewayKeyName: string;
     startedAt: string;
     endedAt: string;
     [key: string]: unknown;
   };
-  if (!metrics.aiGatewayKeyName) throw new Error("Metrics file is missing aiGatewayKeyName");
-  if (!metrics.startedAt || !metrics.endedAt) throw new Error("Metrics file is missing start/end times");
+  if (!metrics.sandbox) throw new Error("Metrics file is missing sandbox");
 
-  const key = await createAiGatewayKey(`usage-${metrics.slug}`);
-  try {
-    const usage = await waitForAiGatewayUsage(
-      key.key,
-      metrics.aiGatewayKeyName,
-      Date.parse(metrics.startedAt),
-      Date.parse(metrics.endedAt),
-    );
-    if (!usage) throw new Error("AI Gateway usage still is not available");
+  const sandbox = await Sandbox.get({ name: metrics.sandbox });
+  if (metrics.researchModel && metrics.buildModel) {
+    const usageByModel = await estimateOpenCodeUsage(sandbox, [metrics.researchModel, metrics.buildModel]);
+    if (!usageByModel) throw new Error("OpenCode usage is not available");
 
-    const pricing = await modelPricing(metrics.model);
-    const usageTable = usageCostRows(usage, pricing);
-    if (metrics.aiGatewayKeyId) await deleteAiGatewayKey(metrics.aiGatewayKeyId);
+    const usageTables = await usageTablesByModel(usageByModel);
+    const totalUsage = sumUsage(usageByModel);
     const nextMetrics = {
-      ...metrics,
-      usage,
-      pricing,
-      usageTable,
-      aiGatewayKeyDeletedAt: metrics.aiGatewayKeyId ? new Date().toISOString() : metrics.aiGatewayKeyDeletedAt,
+      ...withoutReportedUsage(metrics),
+      estimatedUsageByModel: usageByModel,
+      estimatedUsageTables: usageTables,
+      estimatedTotalUsage: totalUsage,
     };
     await writeRunMetrics(metricsPath, nextMetrics);
 
-    console.log(formatUsageTable(usageTable));
-    console.log(`Requests: ${usage.requestCount}`);
-    console.log(`Vercel reported total: ${money(usage.totalCost)}`);
+    for (const table of usageTables) {
+      console.log(`\nModel: ${table.usage.model}`);
+      console.log(formatUsageTable(table.rows));
+      console.log(`OpenCode sessions: ${table.usage.requestCount}`);
+      console.log(`Estimated total: ${money(table.usage.totalCost)}`);
+    }
+    console.log(`\nCombined OpenCode sessions: ${totalUsage.requestCount}`);
+    console.log(`Combined estimated total: ${money(totalUsage.totalCost)}`);
     return nextMetrics;
-  } finally {
-    await deleteAiGatewayKey(key.id);
   }
+
+  const usage = (await estimateOpenCodeUsage(sandbox, [metrics.model]))?.[0];
+  if (!usage) throw new Error("OpenCode usage is not available");
+
+  const pricing = await modelPricing(metrics.model);
+  const usageTable = usageCostRows(usage, pricing);
+  const nextMetrics = {
+    ...withoutReportedUsage(metrics),
+    estimatedUsage: usage,
+    estimatedPricing: pricing,
+    estimatedUsageTable: usageTable,
+  };
+  await writeRunMetrics(metricsPath, nextMetrics);
+
+  console.log(formatUsageTable(usageTable));
+  console.log(`OpenCode sessions: ${usage.requestCount}`);
+  console.log(`Estimated total: ${money(usage.totalCost)}`);
+  return nextMetrics;
 }
 
 async function runVercel(args: string[]) {
@@ -731,6 +721,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
   const vercelToken = process.env.VERCEL_TOKEN ?? "";
   const startMs = Date.now();
   const metricsPath = join(process.cwd(), "runs", `${new Date(startMs).toISOString().replace(/[:.]/g, "-")}-${slug}.json`);
+  const agentId = resolveAgentId(options.agentId);
 
   if (!githubToken) throw new Error("Missing GITHUB_TOKEN");
 
@@ -820,6 +811,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       model,
       aiGatewayBudget: aiGatewayKey.budget,
       metricsPath,
+      agentId,
     };
 
     await writeRunMetrics(metricsPath, {
@@ -835,7 +827,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
     const { output, finished } = await streamUntilFinished(command, startMs);
     if (finished.exitCode !== 0) {
       const endMs = Date.now();
-      const usage = await waitForAiGatewayUsage(aiGatewayKey.key, aiGatewayKey.name, startMs, endMs);
+      const usage = (await estimateOpenCodeUsage(sandbox, [model]))?.[0];
       const pricing = usage ? await modelPricing(model) : undefined;
       const usageTable = usage && pricing ? usageCostRows(usage, pricing) : undefined;
       await writeRunMetrics(metricsPath, {
@@ -848,28 +840,20 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
         status: "failed",
         exitCode: finished.exitCode,
         outputTail: outputTail(output),
-        usage,
-        pricing,
-        usageTable,
-        aiGatewayKeyDeletedAt: usage ? new Date().toISOString() : undefined,
+        estimatedUsage: usage,
+        estimatedPricing: pricing,
+        estimatedUsageTable: usageTable,
       });
       process.exitCode = finished.exitCode ?? 1;
       console.error(`\nRedesign failed with exit code ${finished.exitCode}. Sandbox left running for inspection: ${sandbox.name}`);
       console.error(outputTail(output));
-      resumeAgent(options.agentId, [
-        `The redesign job failed for ${slug}.`,
-        `Exit code: ${finished.exitCode}`,
-        `Metrics: ${metricsPath}`,
-        "Please inspect the metrics and recent output, then continue recovery if it is recoverable.",
-      ].join("\n"));
-      if (usage) await deleteAiGatewayKey(aiGatewayKey.id);
       return result;
     }
 
     const redesignUrl = await aliasRedesignUrl(extractRedesignUrl(output), expectedRedesignUrl, slug);
     const endMs = Date.now();
     const wallTimeSeconds = Math.round((endMs - startMs) / 1000);
-    const usage = await waitForAiGatewayUsage(aiGatewayKey.key, aiGatewayKey.name, startMs, endMs);
+    const usage = (await estimateOpenCodeUsage(sandbox, [model]))?.[0];
     const pricing = usage ? await modelPricing(model) : undefined;
     const usageTable = usage && pricing ? usageCostRows(usage, pricing) : undefined;
     await writeRunMetrics(metricsPath, {
@@ -881,10 +865,10 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       wallTimeSeconds,
       status: "succeeded",
       redesignUrl,
-      usage,
-      pricing,
-      usageTable,
-      aiGatewayKeyDeletedAt: usage ? new Date().toISOString() : undefined,
+      estimatedUsage: usage,
+      estimatedPricing: pricing,
+      estimatedUsageTable: usageTable,
+      aiGatewayKeyDeletedAt: new Date().toISOString(),
     });
 
     if (options.keepSandbox) {
@@ -900,51 +884,38 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
     console.log(`Wall time: ${wallTimeSeconds}s`);
     if (usageTable && usage) {
       console.log(formatUsageTable(usageTable));
-      console.log(`Requests: ${usage.requestCount}`);
-      console.log(`Vercel reported total: ${money(usage.totalCost)}`);
+      console.log(`OpenCode sessions: ${usage.requestCount}`);
+      console.log(`Estimated total: ${money(usage.totalCost)}`);
     } else {
-      console.log("AI Gateway usage: unavailable after waiting 5 minutes");
-      console.log("AI Gateway key kept for later usage refresh.");
+      console.log("Estimated usage: unavailable from OpenCode session data");
     }
     console.log(`AI Gateway budget: $${aiGatewayKey.budget}`);
     console.log(`Metrics: ${metricsPath}`);
 
-    resumeAgent(options.agentId, [
-      `The redesign job succeeded for ${slug}.`,
-      `Original URL: ${originalUrl}`,
-      `Redesign URL: ${redesignUrl}`,
-      `GitHub repo: ${repo.htmlUrl}`,
-      `Wall time: ${wallTimeSeconds}s`,
-      `Metrics: ${metricsPath}`,
-      "Please report the result concisely.",
-    ].join("\n"));
-    if (usage) await deleteAiGatewayKey(aiGatewayKey.id);
+    await deleteAiGatewayKey(aiGatewayKey.id);
     return result;
   } catch (error) {
-    await deleteAiGatewayKey(aiGatewayKey.id);
+    if (!sandbox) await deleteAiGatewayKey(aiGatewayKey.id);
     if (sandbox) console.error(`Sandbox left running for inspection: ${sandbox.name}`);
-    resumeAgent(options.agentId, [
-      `The redesign job failed for ${slug}.`,
-      `Error: ${error instanceof Error ? error.message : String(error)}`,
-      `Metrics: ${metricsPath}`,
-      "Please inspect the failure and decide the next recovery step.",
-    ].join("\n"));
     throw error;
   }
 }
 
-export async function continueRedesign(previousMetricsPath: string): Promise<RedesignResult> {
+export async function continueRedesign(previousMetricsPath: string, options: { agentId?: string } = {}): Promise<RedesignResult> {
   const previous = await readRunMetrics(previousMetricsPath);
   if (previous.status === "succeeded") {
     throw new Error(`Run already succeeded: ${previous.redesignUrl ?? previous.expectedRedesignUrl}`);
   }
 
-  const model = gatewayModelFromInput(previous.model);
+  const agentId = resolveAgentId(options.agentId) ?? previous.agentId;
+  const model = modelForContinue(previous);
   const opencodeModel = opencodeModelForGatewayModel(model);
   const budget = Number(previous.aiGatewayBudget || DEFAULT_AI_GATEWAY_BUDGET);
   const startMs = Date.now();
   const metricsPath = join(process.cwd(), "runs", `${new Date(startMs).toISOString().replace(/[:.]/g, "-")}-${previous.slug}-continue.json`);
-  const aiGatewayKey = await createAiGatewayKey(`${previous.slug}-continue`, budget);
+  const aiGatewayKey = previous.aiGatewayKeyDeletedAt ? await createAiGatewayKey(`${previous.slug}-continue`, budget) : undefined;
+  const aiGatewayKeyId = aiGatewayKey?.id ?? previous.aiGatewayKeyId;
+  const aiGatewayKeyName = aiGatewayKey?.name ?? previous.aiGatewayKeyName;
 
   const result: RedesignResult = {
     sandbox: previous.sandbox,
@@ -956,6 +927,7 @@ export async function continueRedesign(previousMetricsPath: string): Promise<Red
     model,
     aiGatewayBudget: budget,
     metricsPath,
+    agentId,
   };
 
   try {
@@ -967,7 +939,7 @@ export async function continueRedesign(previousMetricsPath: string): Promise<Red
       args: ["run", "continue", "--continue", "--auto", "--dir", WORKDIR, "--model", opencodeModel],
       detached: true,
       env: {
-        AI_GATEWAY_API_KEY: aiGatewayKey.key,
+        ...(aiGatewayKey ? { AI_GATEWAY_API_KEY: aiGatewayKey.key } : {}),
         GITHUB_TOKEN: process.env.GITHUB_TOKEN ?? "",
         GIT_USERNAME: "x-access-token",
         GIT_PASSWORD: process.env.GITHUB_TOKEN ?? "",
@@ -984,8 +956,8 @@ export async function continueRedesign(previousMetricsPath: string): Promise<Red
       ...result,
       previousMetricsPath,
       previousCommand: previous.command,
-      aiGatewayKeyId: aiGatewayKey.id,
-      aiGatewayKeyName: aiGatewayKey.name,
+      aiGatewayKeyId,
+      aiGatewayKeyName,
       startedAt: new Date(startMs).toISOString(),
       status: "running",
     });
@@ -994,25 +966,25 @@ export async function continueRedesign(previousMetricsPath: string): Promise<Red
 
     const { output, finished } = await streamUntilFinished(command, startMs);
     const endMs = Date.now();
-    const usage = await waitForAiGatewayUsage(aiGatewayKey.key, aiGatewayKey.name, startMs, endMs);
+    const usage = (await estimateOpenCodeUsage(sandbox, [model]))?.[0];
     const pricing = usage ? await modelPricing(model) : undefined;
     const usageTable = usage && pricing ? usageCostRows(usage, pricing) : undefined;
     const terminalMetrics = {
       ...result,
       previousMetricsPath,
       previousCommand: previous.command,
-      aiGatewayKeyId: aiGatewayKey.id,
-      aiGatewayKeyName: aiGatewayKey.name,
+      aiGatewayKeyId,
+      aiGatewayKeyName,
       startedAt: new Date(startMs).toISOString(),
       endedAt: new Date(endMs).toISOString(),
       wallTimeSeconds: Math.round((endMs - startMs) / 1000),
       status: finished.exitCode === 0 ? "succeeded" : "failed",
       exitCode: finished.exitCode,
       outputTail: finished.exitCode === 0 ? undefined : outputTail(output),
-      usage,
-      pricing,
-      usageTable,
-      aiGatewayKeyDeletedAt: usage ? new Date().toISOString() : undefined,
+      estimatedUsage: usage,
+      estimatedPricing: pricing,
+      estimatedUsageTable: usageTable,
+      aiGatewayKeyDeletedAt: finished.exitCode === 0 && aiGatewayKey ? new Date().toISOString() : previous.aiGatewayKeyDeletedAt,
     };
 
     if (finished.exitCode === 0) {
@@ -1031,13 +1003,12 @@ export async function continueRedesign(previousMetricsPath: string): Promise<Red
 
     if (usageTable && usage) {
       console.log(formatUsageTable(usageTable));
-      console.log(`Requests: ${usage.requestCount}`);
-      console.log(`Vercel reported total: ${money(usage.totalCost)}`);
-      await deleteAiGatewayKey(aiGatewayKey.id);
+      console.log(`OpenCode sessions: ${usage.requestCount}`);
+      console.log(`Estimated total: ${money(usage.totalCost)}`);
     } else {
-      console.log("AI Gateway usage: unavailable after waiting 5 minutes");
-      console.log("AI Gateway key kept for later usage refresh.");
+      console.log("Estimated usage: unavailable from OpenCode session data");
     }
+    if (finished.exitCode === 0 && aiGatewayKey) await deleteAiGatewayKey(aiGatewayKey.id);
     console.log(`AI Gateway budget: $${budget}`);
     console.log(`Metrics: ${metricsPath}`);
     return result;
@@ -1047,15 +1018,14 @@ export async function continueRedesign(previousMetricsPath: string): Promise<Red
       ...result,
       previousMetricsPath,
       previousCommand: previous.command,
-      aiGatewayKeyId: aiGatewayKey.id,
-      aiGatewayKeyName: aiGatewayKey.name,
+      aiGatewayKeyId,
+      aiGatewayKeyName,
       startedAt: new Date(startMs).toISOString(),
       endedAt: new Date(endMs).toISOString(),
       wallTimeSeconds: Math.round((endMs - startMs) / 1000),
       status: "failed",
       error: error instanceof Error ? error.message : String(error),
     });
-    await deleteAiGatewayKey(aiGatewayKey.id);
     throw error;
   }
 }
@@ -1071,6 +1041,7 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
   const vercelToken = process.env.VERCEL_TOKEN ?? "";
   const startMs = Date.now();
   const metricsPath = join(process.cwd(), "runs", `${new Date(startMs).toISOString().replace(/[:.]/g, "-")}-${slug}.json`);
+  const agentId = resolveAgentId(options.agentId);
 
   if (!githubToken) throw new Error("Missing GITHUB_TOKEN");
 
@@ -1087,6 +1058,7 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
     model: `${researchModel} + ${buildModel}`,
     aiGatewayBudget: aiGatewayKey.budget,
     metricsPath,
+    agentId,
   };
 
   try {
@@ -1211,7 +1183,7 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
     const redesignUrl = await aliasRedesignUrl(extractRedesignUrl(buildRun.output), expectedRedesignUrl, slug);
     const endMs = Date.now();
     const wallTimeSeconds = Math.round((endMs - startMs) / 1000);
-    const usageByModel = await waitForAiGatewayUsageByModel(aiGatewayKey.key, startMs, endMs);
+    const usageByModel = await estimateOpenCodeUsage(sandbox, [researchModel, buildModel]);
     const usageTables = usageByModel ? await usageTablesByModel(usageByModel) : undefined;
     const totalUsage = usageByModel ? sumUsage(usageByModel) : undefined;
 
@@ -1228,10 +1200,10 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
       buildModel,
       researchCommand: research.cmdId,
       buildCommand: build.cmdId,
-      usageByModel,
-      usageTables,
-      totalUsage,
-      aiGatewayKeyDeletedAt: usageByModel ? new Date().toISOString() : undefined,
+      estimatedUsageByModel: usageByModel,
+      estimatedUsageTables: usageTables,
+      estimatedTotalUsage: totalUsage,
+      aiGatewayKeyDeletedAt: new Date().toISOString(),
     });
 
     if (options.keepSandbox) await sandbox.stop();
@@ -1246,33 +1218,22 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
       for (const table of usageTables) {
         console.log(`\nModel: ${table.usage.model}`);
         console.log(formatUsageTable(table.rows));
-        console.log(`Requests: ${table.usage.requestCount}`);
-        console.log(`Vercel reported total: ${money(table.usage.totalCost)}`);
+        console.log(`OpenCode sessions: ${table.usage.requestCount}`);
+        console.log(`Estimated total: ${money(table.usage.totalCost)}`);
       }
-      console.log(`\nCombined requests: ${totalUsage.requestCount}`);
-      console.log(`Combined Vercel reported total: ${money(totalUsage.totalCost)}`);
+      console.log(`\nCombined OpenCode sessions: ${totalUsage.requestCount}`);
+      console.log(`Combined estimated total: ${money(totalUsage.totalCost)}`);
     } else {
-      console.log("AI Gateway model usage: unavailable after waiting 5 minutes");
-      console.log("AI Gateway key kept for later usage refresh.");
+      console.log("Estimated usage: unavailable from OpenCode session data");
     }
     console.log(`AI Gateway budget: $${aiGatewayKey.budget}`);
     console.log(`Metrics: ${metricsPath}`);
 
-    resumeAgent(options.agentId, [
-      `The hybrid redesign job succeeded for ${slug}.`,
-      `Original URL: ${originalUrl}`,
-      `Redesign URL: ${redesignUrl}`,
-      `GitHub repo: ${repo.htmlUrl}`,
-      `Wall time: ${wallTimeSeconds}s`,
-      `Cost: ${money(totalUsage?.totalCost ?? 0)}`,
-      `Metrics: ${metricsPath}`,
-      "Please report the result concisely.",
-    ].join("\n"));
-    if (usageByModel) await deleteAiGatewayKey(aiGatewayKey.id);
+    await deleteAiGatewayKey(aiGatewayKey.id);
     return result;
   } catch (error) {
     const endMs = Date.now();
-    const usageByModel = await waitForAiGatewayUsageByModel(aiGatewayKey.key, startMs, endMs);
+    const usageByModel = sandbox ? await estimateOpenCodeUsage(sandbox, [researchModel, buildModel]) : undefined;
     await writeRunMetrics(metricsPath, {
       ...result,
       aiGatewayKeyId: aiGatewayKey.id,
@@ -1283,19 +1244,12 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
       status: "failed",
       researchModel,
       buildModel,
-      usageByModel,
-      totalUsage: usageByModel ? sumUsage(usageByModel) : undefined,
-      aiGatewayKeyDeletedAt: usageByModel ? new Date().toISOString() : undefined,
+      estimatedUsageByModel: usageByModel,
+      estimatedTotalUsage: usageByModel ? sumUsage(usageByModel) : undefined,
       error: error instanceof Error ? error.message : String(error),
     });
-    if (usageByModel) await deleteAiGatewayKey(aiGatewayKey.id);
+    if (!sandbox) await deleteAiGatewayKey(aiGatewayKey.id);
     if (sandbox) console.error(`Sandbox left running for inspection: ${sandbox.name}`);
-    resumeAgent(options.agentId, [
-      `The hybrid redesign job failed for ${slug}.`,
-      `Error: ${error instanceof Error ? error.message : String(error)}`,
-      `Metrics: ${metricsPath}`,
-      "Please inspect the failure and decide the next recovery step.",
-    ].join("\n"));
     throw error;
   }
 }
