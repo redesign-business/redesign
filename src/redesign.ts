@@ -13,7 +13,7 @@ export type RedesignOptions = {
   model?: string;
   timeoutMinutes?: number;
   keepSandbox?: boolean;
-  notifySession?: string;
+  agentSessionId?: string;
 };
 
 export type HybridRedesignOptions = Omit<RedesignOptions, "model"> & {
@@ -277,14 +277,22 @@ function outputTail(output: string, maxChars = 4000) {
   return output.slice(Math.max(0, output.length - maxChars));
 }
 
-async function notifySession(sessionId: string | undefined, title: string, body: string) {
+export function resumeAgentSession(agentSessionId: string | undefined, prompt: string) {
+  const sessionId = agentSessionId === "current" ? process.env.CODEX_THREAD_ID : agentSessionId;
   if (!sessionId) return;
-  const script = `display notification ${JSON.stringify(body)} with title ${JSON.stringify(title)} subtitle ${JSON.stringify(sessionId)}`;
-  await new Promise<void>((resolve) => {
-    const child = spawn("osascript", ["-e", script]);
-    child.on("close", () => resolve());
-    child.on("error", () => resolve());
-  });
+
+  try {
+    const child = spawn("codex", ["exec", "resume", "--skip-git-repo-check", sessionId, prompt], {
+      cwd: process.cwd(),
+      detached: true,
+      env: process.env,
+      stdio: "ignore",
+    });
+    child.on("error", () => {});
+    child.unref();
+  } catch {
+    // Best effort: the metrics file remains the source of truth.
+  }
 }
 
 async function streamUntilFinished(command: Command, startedAt: number) {
@@ -848,7 +856,12 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       process.exitCode = finished.exitCode ?? 1;
       console.error(`\nRedesign failed with exit code ${finished.exitCode}. Sandbox left running for inspection: ${sandbox.name}`);
       console.error(outputTail(output));
-      await notifySession(options.notifySession, `Redesign failed: ${slug}`, `Exit ${finished.exitCode}. Metrics: ${metricsPath}`);
+      resumeAgentSession(options.agentSessionId, [
+        `The redesign job failed for ${slug}.`,
+        `Exit code: ${finished.exitCode}`,
+        `Metrics: ${metricsPath}`,
+        "Please inspect the metrics and recent output, then continue recovery if it is recoverable.",
+      ].join("\n"));
       if (usage) await deleteAiGatewayKey(aiGatewayKey.id);
       return result;
     }
@@ -896,13 +909,26 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
     console.log(`AI Gateway budget: $${aiGatewayKey.budget}`);
     console.log(`Metrics: ${metricsPath}`);
 
-    await notifySession(options.notifySession, `Redesign succeeded: ${slug}`, `${redesignUrl} · ${wallTimeSeconds}s`);
+    resumeAgentSession(options.agentSessionId, [
+      `The redesign job succeeded for ${slug}.`,
+      `Original URL: ${originalUrl}`,
+      `Redesign URL: ${redesignUrl}`,
+      `GitHub repo: ${repo.htmlUrl}`,
+      `Wall time: ${wallTimeSeconds}s`,
+      `Metrics: ${metricsPath}`,
+      "Please report the result concisely.",
+    ].join("\n"));
     if (usage) await deleteAiGatewayKey(aiGatewayKey.id);
     return result;
   } catch (error) {
     await deleteAiGatewayKey(aiGatewayKey.id);
     if (sandbox) console.error(`Sandbox left running for inspection: ${sandbox.name}`);
-    await notifySession(options.notifySession, `Redesign failed: ${slug}`, error instanceof Error ? error.message : String(error));
+    resumeAgentSession(options.agentSessionId, [
+      `The redesign job failed for ${slug}.`,
+      `Error: ${error instanceof Error ? error.message : String(error)}`,
+      `Metrics: ${metricsPath}`,
+      "Please inspect the failure and decide the next recovery step.",
+    ].join("\n"));
     throw error;
   }
 }
@@ -1232,7 +1258,16 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
     console.log(`AI Gateway budget: $${aiGatewayKey.budget}`);
     console.log(`Metrics: ${metricsPath}`);
 
-    await notifySession(options.notifySession, `Hybrid succeeded: ${slug}`, `${redesignUrl} · ${money(totalUsage?.totalCost ?? 0)} · ${wallTimeSeconds}s`);
+    resumeAgentSession(options.agentSessionId, [
+      `The hybrid redesign job succeeded for ${slug}.`,
+      `Original URL: ${originalUrl}`,
+      `Redesign URL: ${redesignUrl}`,
+      `GitHub repo: ${repo.htmlUrl}`,
+      `Wall time: ${wallTimeSeconds}s`,
+      `Cost: ${money(totalUsage?.totalCost ?? 0)}`,
+      `Metrics: ${metricsPath}`,
+      "Please report the result concisely.",
+    ].join("\n"));
     if (usageByModel) await deleteAiGatewayKey(aiGatewayKey.id);
     return result;
   } catch (error) {
@@ -1255,7 +1290,12 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
     });
     if (usageByModel) await deleteAiGatewayKey(aiGatewayKey.id);
     if (sandbox) console.error(`Sandbox left running for inspection: ${sandbox.name}`);
-    await notifySession(options.notifySession, `Hybrid failed: ${slug}`, error instanceof Error ? error.message : String(error));
+    resumeAgentSession(options.agentSessionId, [
+      `The hybrid redesign job failed for ${slug}.`,
+      `Error: ${error instanceof Error ? error.message : String(error)}`,
+      `Metrics: ${metricsPath}`,
+      "Please inspect the failure and decide the next recovery step.",
+    ].join("\n"));
     throw error;
   }
 }
