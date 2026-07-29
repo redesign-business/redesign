@@ -13,6 +13,7 @@ export type RedesignOptions = {
   model?: string;
   timeoutMinutes?: number;
   keepSandbox?: boolean;
+  notifySession?: string;
 };
 
 export type HybridRedesignOptions = Omit<RedesignOptions, "model"> & {
@@ -274,6 +275,16 @@ function money(value: number) {
 
 function outputTail(output: string, maxChars = 4000) {
   return output.slice(Math.max(0, output.length - maxChars));
+}
+
+async function notifySession(sessionId: string | undefined, title: string, body: string) {
+  if (!sessionId) return;
+  const script = `display notification ${JSON.stringify(body)} with title ${JSON.stringify(title)} subtitle ${JSON.stringify(sessionId)}`;
+  await new Promise<void>((resolve) => {
+    const child = spawn("osascript", ["-e", script]);
+    child.on("close", () => resolve());
+    child.on("error", () => resolve());
+  });
 }
 
 async function streamUntilFinished(command: Command, startedAt: number) {
@@ -837,6 +848,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       process.exitCode = finished.exitCode ?? 1;
       console.error(`\nRedesign failed with exit code ${finished.exitCode}. Sandbox left running for inspection: ${sandbox.name}`);
       console.error(outputTail(output));
+      await notifySession(options.notifySession, `Redesign failed: ${slug}`, `Exit ${finished.exitCode}. Metrics: ${metricsPath}`);
       if (usage) await deleteAiGatewayKey(aiGatewayKey.id);
       return result;
     }
@@ -884,11 +896,13 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
     console.log(`AI Gateway budget: $${aiGatewayKey.budget}`);
     console.log(`Metrics: ${metricsPath}`);
 
+    await notifySession(options.notifySession, `Redesign succeeded: ${slug}`, `${redesignUrl} · ${wallTimeSeconds}s`);
     if (usage) await deleteAiGatewayKey(aiGatewayKey.id);
     return result;
   } catch (error) {
     await deleteAiGatewayKey(aiGatewayKey.id);
     if (sandbox) console.error(`Sandbox left running for inspection: ${sandbox.name}`);
+    await notifySession(options.notifySession, `Redesign failed: ${slug}`, error instanceof Error ? error.message : String(error));
     throw error;
   }
 }
@@ -1218,6 +1232,7 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
     console.log(`AI Gateway budget: $${aiGatewayKey.budget}`);
     console.log(`Metrics: ${metricsPath}`);
 
+    await notifySession(options.notifySession, `Hybrid succeeded: ${slug}`, `${redesignUrl} · ${money(totalUsage?.totalCost ?? 0)} · ${wallTimeSeconds}s`);
     if (usageByModel) await deleteAiGatewayKey(aiGatewayKey.id);
     return result;
   } catch (error) {
@@ -1240,6 +1255,7 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
     });
     if (usageByModel) await deleteAiGatewayKey(aiGatewayKey.id);
     if (sandbox) console.error(`Sandbox left running for inspection: ${sandbox.name}`);
+    await notifySession(options.notifySession, `Hybrid failed: ${slug}`, error instanceof Error ? error.message : String(error));
     throw error;
   }
 }

@@ -3,8 +3,8 @@ import { cleanupSandbox, commandOutput, continueRedesign, parseArgs, readRequire
 const [cmd = "help", ...rest] = process.argv.slice(2);
 const usage = [
   "Usage:",
-  "  npm run redesign <url> [--slug <slug>] [--model <model>] [--keep-sandbox]",
-  "  npm run hybrid <url> [--slug <slug>] [--research-model <model>] [--build-model <model>] [--keep-sandbox]",
+  "  npm run redesign <url> [--slug <slug>] [--model <model>] [--notify-session <id>] [--keep-sandbox]",
+  "  npm run hybrid <url> [--slug <slug>] [--research-model <model>] [--build-model <model>] [--notify-session <id>] [--keep-sandbox]",
   "  npm run continue -- --metrics <path>",
   "  npm run logs -- --sandbox <sandbox> --command <command>",
   "  npm run stop -- --sandbox <sandbox>",
@@ -28,6 +28,7 @@ try {
       slug: args.get("slug"),
       model: args.get("model"),
       keepSandbox: args.get("keep-sandbox") === "true",
+      notifySession: args.get("notify-session"),
       timeoutMinutes: args.has("timeout") ? Number(args.get("timeout")) : undefined,
     });
   } else if (cmd === "hybrid") {
@@ -40,6 +41,7 @@ try {
       researchModel: args.get("research-model"),
       buildModel: args.get("build-model"),
       keepSandbox: args.get("keep-sandbox") === "true",
+      notifySession: args.get("notify-session"),
       timeoutMinutes: args.has("timeout") ? Number(args.get("timeout")) : undefined,
     });
   } else if (cmd === "logs") {

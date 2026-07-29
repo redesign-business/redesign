@@ -21,6 +21,9 @@ assert.equal(parsed.args.get("slug"), "Acme Plumbing");
 assert.equal(parsed.args.get("keep-sandbox"), "true");
 assert.throws(() => parseArgs(["--slug"]), /Missing value/);
 
+const parsedNotify = parseArgs(["https://acme.test", "--notify-session", "thread-123"]);
+assert.equal(parsedNotify.args.get("notify-session"), "thread-123");
+
 assert.equal(normalizeHttpUrl("acme.test"), "https://acme.test/");
 assert.equal(slugFromUrl("https://www.Acme-Plumbing.com/services"), "acme-plumbing");
 assert.equal(slugFromUrl("https://jobs.Acme-Plumbing.com/services"), "jobs-acme-plumbing");
