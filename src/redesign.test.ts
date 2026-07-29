@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   aliasHostForRedesignUrl,
   appendWithoutReplay,
+  buildDesignPrompt,
   buildPrompt,
   buildResearchPrompt,
   buildSitePrompt,
@@ -66,13 +67,25 @@ assert.match(researchPrompt, /2\) Make a proof\.md/);
 assert.match(researchPrompt, /Stop after step 2/);
 assert.doesNotMatch(researchPrompt, /Build the site/);
 
+const designPrompt = buildDesignPrompt({
+  site: "https://acme.test/",
+  slug: "acme",
+  repoUrl: "https://github.com/redesign-business/acme",
+});
+assert.match(designPrompt, /Use proof\.md as the handoff context/);
+assert.match(designPrompt, /Create design\.md/);
+assert.match(designPrompt, /Design system must include/);
+assert.match(designPrompt, /Composition must include/);
+assert.match(designPrompt, /Do not build the site/);
+
 const sitePrompt = buildSitePrompt({
   site: "https://acme.test/",
   slug: "acme",
   repoUrl: "https://github.com/redesign-business/acme",
   expectedRedesignUrl: "https://acme.redesign.business",
 });
-assert.match(sitePrompt, /Use raw\.md, proof\.md, and images\/ as the handoff/);
+assert.match(sitePrompt, /Build the website from the existing handoff files: design\.md, proof\.md, raw\.md, and images\//);
+assert.match(sitePrompt, /Use design\.md as the design handoff/);
 assert.match(sitePrompt, /3\) Build the site/);
 assert.match(sitePrompt, /4\) Run the refine-landing-page pass/);
 assert.match(sitePrompt, /5\) Run the web-quality-audit pass/);

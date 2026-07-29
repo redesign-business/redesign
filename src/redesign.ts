@@ -19,6 +19,8 @@ export type RedesignOptions = {
 
 export type HybridRedesignOptions = Omit<RedesignOptions, "model"> & {
   researchModel?: string;
+  designModel?: string;
+  implementationModel?: string;
   buildModel?: string;
 };
 
@@ -74,7 +76,8 @@ const OPENCODE_BIN = "/home/vercel-sandbox/.opencode/node_modules/.bin/opencode"
 const WORKDIR = "/vercel/sandbox";
 const DEFAULT_MODEL = "deepseek/deepseek-v4-pro";
 const DEFAULT_RESEARCH_MODEL = "deepseek/deepseek-v4-pro";
-const DEFAULT_BUILD_MODEL = "openai/gpt-5.6-sol";
+const DEFAULT_DESIGN_MODEL = "openai/gpt-5.6-sol";
+const DEFAULT_IMPLEMENTATION_MODEL = "deepseek/deepseek-v4-pro";
 const DEFAULT_GITHUB_OWNER = "redesign-business";
 const DEFAULT_BASE_DOMAIN = "redesign.business";
 const DEFAULT_AI_GATEWAY_BUDGET = 1;
@@ -162,7 +165,10 @@ export function resolveAgentId(agentId: string | undefined) {
 }
 
 function modelForContinue(previous: RunMetrics) {
-  return gatewayModelFromInput(typeof previous.buildModel === "string" ? previous.buildModel : previous.model);
+  if (previous.phase === "design" && typeof previous.designModel === "string") return gatewayModelFromInput(previous.designModel);
+  if (previous.phase === "implementation" && typeof previous.implementationModel === "string") return gatewayModelFromInput(previous.implementationModel);
+  if (typeof previous.buildModel === "string") return gatewayModelFromInput(previous.buildModel);
+  return gatewayModelFromInput(typeof previous.implementationModel === "string" ? previous.implementationModel : previous.model);
 }
 
 export function buildPrompt(options: {
@@ -230,6 +236,31 @@ export function buildResearchPrompt(options: {
   ].join("\n");
 }
 
+export function buildDesignPrompt(options: {
+  site: string;
+  slug: string;
+  repoUrl: string;
+}) {
+  return [
+    "Use proof.md as the handoff context.",
+    "",
+    `Project slug: ${options.slug}`,
+    `GitHub repo: ${options.repoUrl}`,
+    `Original URL: ${options.site}`,
+    "",
+    "Task:",
+    "Create design.md. Do not build the site. Do not deploy.",
+    "The goal is a tasteful presentation of the proof in this standard landing-page order: nav, hero, several proof sections, FAQ, final CTA, footer.",
+    "Design system must include: one font or separate heading/body fonts, neutral palette, primary color, optional secondary color, spacing, border radius, borders yes/no, shadows yes/no, motion/animation usage, and icon library.",
+    "Composition must include concrete descriptions of the layout for the nav, hero, proof sections, FAQ, final CTA, footer, and any useful proof-focused band below the hero.",
+    "Use the business's demonstrated proof from proof.md to inspire the visual hierarchy and section ideas. Do not invent proof.",
+    "Commit and push design.md to main.",
+    "Never print secrets, tokens, full environment variables, credential helper output, or auth headers.",
+    "",
+    "You are done when design.md exists and main is pushed to GitHub.",
+  ].join("\n");
+}
+
 export function buildSitePrompt(options: {
   site: string;
   slug: string;
@@ -237,7 +268,7 @@ export function buildSitePrompt(options: {
   expectedRedesignUrl: string;
 }) {
   return [
-    "Build the website from the existing handoff files: raw.md, proof.md, and images/.",
+    "Build the website from the existing handoff files: design.md, proof.md, raw.md, and images/.",
     "",
     "Use these local skill files in order:",
     "1. .opencode/skills/nextjs-site-building/SKILL.md",
@@ -250,7 +281,7 @@ export function buildSitePrompt(options: {
     `Preferred redesign URL: ${options.expectedRedesignUrl}`,
     "",
     "Task:",
-    "Use raw.md, proof.md, and images/ as the handoff from steps 1-2.",
+    "Use design.md as the design handoff. Use proof.md as the content/proof source of truth. Use raw.md and images/ only as supporting source material.",
     "3) Build the site. Use the business's unique data to inspire the design. Typical structure: nav, hero, several proof sections, FAQ, final CTA, footer. No text-only sections except nav, banners, the bar below hero, and footer. Do not repeat images or other media. There is one CTA; use it everywhere.",
     "4) Run the refine-landing-page pass.",
     "5) Run the web-quality-audit pass.",
@@ -551,6 +582,8 @@ export async function refreshUsage(metricsPath: string) {
     model: string;
     status?: string;
     researchModel?: string;
+    designModel?: string;
+    implementationModel?: string;
     buildModel?: string;
     aiGatewayKeyId?: string;
     aiGatewayKeyName: string;
@@ -561,8 +594,10 @@ export async function refreshUsage(metricsPath: string) {
   if (!metrics.sandbox) throw new Error("Metrics file is missing sandbox");
 
   const sandbox = await Sandbox.get({ name: metrics.sandbox });
-  if (metrics.researchModel && metrics.buildModel) {
-    const usageByModel = await estimateOpenCodeUsage(sandbox, [metrics.researchModel, metrics.buildModel]);
+  const models = [metrics.researchModel, metrics.designModel, metrics.implementationModel, metrics.buildModel]
+    .filter((model): model is string => typeof model === "string");
+  if (models.length) {
+    const usageByModel = await estimateOpenCodeUsage(sandbox, [...new Set(models)]);
     if (!usageByModel) throw new Error("OpenCode usage is not available");
 
     const usageTables = await usageTablesByModel(usageByModel);
@@ -1075,9 +1110,11 @@ export async function continueRedesign(previousMetricsPath: string, options: { a
 
 export async function runHybridRedesign(options: HybridRedesignOptions): Promise<RedesignResult> {
   const originalUrl = normalizeHttpUrl(options.site);
-  const slug = normalizeSlug(options.slug ?? `${slugFromUrl(originalUrl)}-deepseek-sol`);
+  const slug = normalizeSlug(options.slug ?? `${slugFromUrl(originalUrl)}-deepseek-sol-deepseek`);
   const researchModel = gatewayModelFromInput(options.researchModel ?? DEFAULT_RESEARCH_MODEL);
-  const buildModel = gatewayModelFromInput(options.buildModel ?? DEFAULT_BUILD_MODEL);
+  const designModel = gatewayModelFromInput(options.designModel ?? options.buildModel ?? DEFAULT_DESIGN_MODEL);
+  const implementationModel = gatewayModelFromInput(options.implementationModel ?? DEFAULT_IMPLEMENTATION_MODEL);
+  const usageModels = [...new Set([researchModel, designModel, implementationModel])];
   const baseDomain = process.env.REDESIGN_BASE_DOMAIN ?? DEFAULT_BASE_DOMAIN;
   const expectedRedesignUrl = `https://${slug}.${baseDomain}`;
   const githubToken = process.env.GITHUB_TOKEN;
@@ -1098,7 +1135,7 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
     originalUrl,
     repoUrl: "",
     expectedRedesignUrl,
-    model: `${researchModel} + ${buildModel}`,
+    model: `${researchModel} + ${designModel} + ${implementationModel}`,
     aiGatewayBudget: aiGatewayKey.budget,
     metricsPath,
     agentId,
@@ -1161,7 +1198,7 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
               npm: "@ai-sdk/gateway",
               env: ["AI_GATEWAY_API_KEY"],
               options: { apiKey: "{env:AI_GATEWAY_API_KEY}" },
-              models: { [researchModel]: {}, [buildModel]: {} },
+              models: Object.fromEntries(usageModels.map((model) => [model, {}])),
             },
           },
         }, null, 2)),
@@ -1169,6 +1206,10 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
       {
         path: "/tmp/research-prompt.md",
         content: Buffer.from(buildResearchPrompt({ site: originalUrl, slug, repoUrl: repo.htmlUrl })),
+      },
+      {
+        path: "/tmp/design-prompt.md",
+        content: Buffer.from(buildDesignPrompt({ site: originalUrl, slug, repoUrl: repo.htmlUrl })),
       },
       {
         path: "/tmp/site-prompt.md",
@@ -1184,7 +1225,8 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
       status: "running",
       phase: "research",
       researchModel,
-      buildModel,
+      designModel,
+      implementationModel,
     });
 
     console.log(JSON.stringify(result, null, 2));
@@ -1206,27 +1248,53 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
       aiGatewayKeyName: aiGatewayKey.name,
       startedAt: new Date(startMs).toISOString(),
       status: "running",
-      phase: "build",
+      phase: "design",
       researchModel,
-      buildModel,
+      designModel,
+      implementationModel,
       researchCommand: research.cmdId,
+    });
+
+    const design = await sandbox.runCommand({
+      cmd: OPENCODE_BIN,
+      args: ["run", "Follow the attached design prompt.", "--auto", "--dir", WORKDIR, "--title", `Design ${slug}`, "--model", opencodeModelForGatewayModel(designModel), "--file", "/tmp/design-prompt.md"],
+      detached: true,
+    });
+    result.command = design.cmdId;
+    const designRun = await streamUntilFinished(design, startMs);
+    if (designRun.finished.exitCode !== 0) {
+      throw new Error(`Design phase failed with exit code ${designRun.finished.exitCode}\n${outputTail(designRun.output)}`);
+    }
+
+    await writeRunMetrics(metricsPath, {
+      ...result,
+      aiGatewayKeyId: aiGatewayKey.id,
+      aiGatewayKeyName: aiGatewayKey.name,
+      startedAt: new Date(startMs).toISOString(),
+      status: "running",
+      phase: "implementation",
+      researchModel,
+      designModel,
+      implementationModel,
+      researchCommand: research.cmdId,
+      designCommand: design.cmdId,
     });
 
     const build = await sandbox.runCommand({
       cmd: OPENCODE_BIN,
-      args: ["run", "Follow the attached redesign prompt.", "--auto", "--dir", WORKDIR, "--title", `Build ${slug}`, "--model", opencodeModelForGatewayModel(buildModel), "--file", "/tmp/site-prompt.md"],
+      args: ["run", "Follow the attached implementation prompt.", "--auto", "--dir", WORKDIR, "--title", `Implement ${slug}`, "--model", opencodeModelForGatewayModel(implementationModel), "--file", "/tmp/site-prompt.md"],
       detached: true,
     });
     result.command = build.cmdId;
     const buildRun = await streamUntilFinished(build, startMs);
     if (buildRun.finished.exitCode !== 0) {
-      throw new Error(`Build phase failed with exit code ${buildRun.finished.exitCode}\n${outputTail(buildRun.output)}`);
+      throw new Error(`Implementation phase failed with exit code ${buildRun.finished.exitCode}\n${outputTail(buildRun.output)}`);
     }
 
     const redesignUrl = await aliasRedesignUrl(extractRedesignUrl(buildRun.output), expectedRedesignUrl, slug);
     const endMs = Date.now();
     const wallTimeSeconds = Math.round((endMs - startMs) / 1000);
-    const usageByModel = await estimateOpenCodeUsage(sandbox, [researchModel, buildModel]);
+    const usageByModel = await estimateOpenCodeUsage(sandbox, usageModels);
     const usageTables = usageByModel ? await usageTablesByModel(usageByModel) : undefined;
     const totalUsage = usageByModel ? sumUsage(usageByModel) : undefined;
 
@@ -1240,9 +1308,11 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
       status: "succeeded",
       redesignUrl,
       researchModel,
-      buildModel,
+      designModel,
+      implementationModel,
       researchCommand: research.cmdId,
-      buildCommand: build.cmdId,
+      designCommand: design.cmdId,
+      implementationCommand: build.cmdId,
       estimatedUsageByModel: usageByModel,
       estimatedUsageTables: usageTables,
       estimatedTotalUsage: totalUsage,
@@ -1276,7 +1346,7 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
     return result;
   } catch (error) {
     const endMs = Date.now();
-    const usageByModel = sandbox ? await estimateOpenCodeUsage(sandbox, [researchModel, buildModel]) : undefined;
+    const usageByModel = sandbox ? await estimateOpenCodeUsage(sandbox, usageModels) : undefined;
     await writeRunMetrics(metricsPath, {
       ...result,
       aiGatewayKeyId: aiGatewayKey.id,
@@ -1286,7 +1356,8 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
       wallTimeSeconds: Math.round((endMs - startMs) / 1000),
       status: "failed",
       researchModel,
-      buildModel,
+      designModel,
+      implementationModel,
       estimatedUsageByModel: usageByModel,
       estimatedTotalUsage: usageByModel ? sumUsage(usageByModel) : undefined,
       error: error instanceof Error ? error.message : String(error),
