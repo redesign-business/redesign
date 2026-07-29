@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
-import { cleanupSandbox, commandOutput, continueRedesign, parseArgs, readRequired, refreshUsage, resumeAgentSession, runHybridRedesign, runRedesign } from "./redesign.js";
+import { cleanupSandbox, commandOutput, continueRedesign, parseArgs, readRequired, refreshUsage, resumeAgent, runHybridRedesign, runRedesign } from "./redesign.js";
 
 const [cmd = "help", ...rest] = process.argv.slice(2);
 const usage = [
   "Usage:",
-  "  npm run redesign <url> [--slug <slug>] [--model <model>] [--agent-session-id <id>] [--keep-sandbox]",
-  "  npm run hybrid <url> [--slug <slug>] [--research-model <model>] [--build-model <model>] [--agent-session-id <id>] [--keep-sandbox]",
+  "  npm run redesign <url> [--slug <slug>] [--model <model>] [--agent-id <id>] [--keep-sandbox]",
+  "  npm run hybrid <url> [--slug <slug>] [--research-model <model>] [--build-model <model>] [--agent-id <id>] [--keep-sandbox]",
   "  npm run continue -- --metrics <path>",
   "  npm run logs -- --sandbox <sandbox> --command <command>",
   "  npm run stop -- --sandbox <sandbox>",
@@ -18,9 +18,9 @@ if (cmd === "help" || rest.includes("--help")) {
 }
 
 const { args, positional } = parseArgs(rest);
-const agentSessionId = args.get("agent-session-id");
+const agentId = args.get("agent-id");
 
-if ((cmd === "redesign" || cmd === "start" || cmd === "hybrid") && agentSessionId && process.env.REDESIGN_AGENT_SUBPROCESS !== "1") {
+if ((cmd === "redesign" || cmd === "start" || cmd === "hybrid") && agentId && process.env.REDESIGN_AGENT_SUBPROCESS !== "1") {
   const script = cmd === "hybrid" ? "hybrid" : "redesign";
   const child = spawn("npm", ["run", script, "--", ...rest], {
     cwd: process.cwd(),
@@ -30,7 +30,7 @@ if ((cmd === "redesign" || cmd === "start" || cmd === "hybrid") && agentSessionI
   });
   child.unref();
   console.log(`Subscribed ${script} job started.`);
-  console.log(`Agent session: ${agentSessionId}`);
+  console.log(`Agent: ${agentId}`);
   process.exit(0);
 }
 
@@ -44,7 +44,7 @@ try {
       slug: args.get("slug"),
       model: args.get("model"),
       keepSandbox: args.get("keep-sandbox") === "true",
-      agentSessionId,
+      agentId,
       timeoutMinutes: args.has("timeout") ? Number(args.get("timeout")) : undefined,
     });
   } else if (cmd === "hybrid") {
@@ -57,7 +57,7 @@ try {
       researchModel: args.get("research-model"),
       buildModel: args.get("build-model"),
       keepSandbox: args.get("keep-sandbox") === "true",
-      agentSessionId,
+      agentId,
       timeoutMinutes: args.has("timeout") ? Number(args.get("timeout")) : undefined,
     });
   } else if (cmd === "logs") {
@@ -75,7 +75,7 @@ try {
   }
 } catch (error) {
   console.error(error instanceof Error ? error.message : error);
-  resumeAgentSession(agentSessionId, [
+  resumeAgent(agentId, [
     `The ${cmd} command failed before completing.`,
     `Error: ${error instanceof Error ? error.message : String(error)}`,
     "Please inspect the local runner state and decide the next recovery step.",

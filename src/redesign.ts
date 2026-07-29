@@ -13,7 +13,7 @@ export type RedesignOptions = {
   model?: string;
   timeoutMinutes?: number;
   keepSandbox?: boolean;
-  agentSessionId?: string;
+  agentId?: string;
 };
 
 export type HybridRedesignOptions = Omit<RedesignOptions, "model"> & {
@@ -277,8 +277,8 @@ function outputTail(output: string, maxChars = 4000) {
   return output.slice(Math.max(0, output.length - maxChars));
 }
 
-export function resumeAgentSession(agentSessionId: string | undefined, prompt: string) {
-  const sessionId = agentSessionId === "current" ? process.env.CODEX_THREAD_ID : agentSessionId;
+export function resumeAgent(agentId: string | undefined, prompt: string) {
+  const sessionId = agentId === "current" ? process.env.CODEX_THREAD_ID : agentId;
   if (!sessionId) return;
 
   try {
@@ -856,7 +856,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       process.exitCode = finished.exitCode ?? 1;
       console.error(`\nRedesign failed with exit code ${finished.exitCode}. Sandbox left running for inspection: ${sandbox.name}`);
       console.error(outputTail(output));
-      resumeAgentSession(options.agentSessionId, [
+      resumeAgent(options.agentId, [
         `The redesign job failed for ${slug}.`,
         `Exit code: ${finished.exitCode}`,
         `Metrics: ${metricsPath}`,
@@ -909,7 +909,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
     console.log(`AI Gateway budget: $${aiGatewayKey.budget}`);
     console.log(`Metrics: ${metricsPath}`);
 
-    resumeAgentSession(options.agentSessionId, [
+    resumeAgent(options.agentId, [
       `The redesign job succeeded for ${slug}.`,
       `Original URL: ${originalUrl}`,
       `Redesign URL: ${redesignUrl}`,
@@ -923,7 +923,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
   } catch (error) {
     await deleteAiGatewayKey(aiGatewayKey.id);
     if (sandbox) console.error(`Sandbox left running for inspection: ${sandbox.name}`);
-    resumeAgentSession(options.agentSessionId, [
+    resumeAgent(options.agentId, [
       `The redesign job failed for ${slug}.`,
       `Error: ${error instanceof Error ? error.message : String(error)}`,
       `Metrics: ${metricsPath}`,
@@ -1258,7 +1258,7 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
     console.log(`AI Gateway budget: $${aiGatewayKey.budget}`);
     console.log(`Metrics: ${metricsPath}`);
 
-    resumeAgentSession(options.agentSessionId, [
+    resumeAgent(options.agentId, [
       `The hybrid redesign job succeeded for ${slug}.`,
       `Original URL: ${originalUrl}`,
       `Redesign URL: ${redesignUrl}`,
@@ -1290,7 +1290,7 @@ export async function runHybridRedesign(options: HybridRedesignOptions): Promise
     });
     if (usageByModel) await deleteAiGatewayKey(aiGatewayKey.id);
     if (sandbox) console.error(`Sandbox left running for inspection: ${sandbox.name}`);
-    resumeAgentSession(options.agentSessionId, [
+    resumeAgent(options.agentId, [
       `The hybrid redesign job failed for ${slug}.`,
       `Error: ${error instanceof Error ? error.message : String(error)}`,
       `Metrics: ${metricsPath}`,

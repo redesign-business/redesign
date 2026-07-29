@@ -21,8 +21,8 @@ assert.equal(parsed.args.get("slug"), "Acme Plumbing");
 assert.equal(parsed.args.get("keep-sandbox"), "true");
 assert.throws(() => parseArgs(["--slug"]), /Missing value/);
 
-const parsedAgentSession = parseArgs(["https://acme.test", "--agent-session-id", "thread-123"]);
-assert.equal(parsedAgentSession.args.get("agent-session-id"), "thread-123");
+const parsedAgent = parseArgs(["https://acme.test", "--agent-id", "thread-123"]);
+assert.equal(parsedAgent.args.get("agent-id"), "thread-123");
 
 assert.equal(normalizeHttpUrl("acme.test"), "https://acme.test/");
 assert.equal(slugFromUrl("https://www.Acme-Plumbing.com/services"), "acme-plumbing");
