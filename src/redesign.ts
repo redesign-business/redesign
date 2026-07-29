@@ -288,11 +288,35 @@ function outputTail(output: string, maxChars = 4000) {
   return output.slice(Math.max(0, output.length - maxChars));
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function appendWithoutReplay(output: string, data: string) {
+  let overlap = Math.min(output.length, data.length);
+  while (overlap > 0 && !output.endsWith(data.slice(0, overlap))) overlap--;
+  return data.slice(overlap);
+}
+
+async function waitForCommand(command: Command) {
+  while (true) {
+    try {
+      return await command.wait();
+    } catch (error) {
+      console.error(`\nCommand status check failed; retrying. ${error instanceof Error ? error.message : String(error)}`);
+      await sleep(5_000);
+    }
+  }
+}
+
 async function streamUntilFinished(command: Command, startedAt: number) {
   const logsAbort = new AbortController();
   let output = "";
   let lastLogAt = Date.now();
-  const waitPromise = command.wait();
+  let finished = false;
+  const waitPromise = waitForCommand(command).finally(() => {
+    finished = true;
+  });
   const heartbeat = setInterval(() => {
     const elapsed = Math.round((Date.now() - startedAt) / 1000);
     const quietFor = Math.round((Date.now() - lastLogAt) / 1000);
@@ -300,30 +324,36 @@ async function streamUntilFinished(command: Command, startedAt: number) {
   }, 30_000);
 
   const logsPromise = (async () => {
-    try {
-      for await (const log of command.logs({ signal: logsAbort.signal })) {
-        lastLogAt = Date.now();
-        output += log.data;
-        const stream = log.stream === "stderr" ? process.stderr : process.stdout;
-        stream.write(log.data);
+    while (!finished && !logsAbort.signal.aborted) {
+      try {
+        for await (const log of command.logs({ signal: logsAbort.signal })) {
+          const fresh = appendWithoutReplay(output, log.data);
+          if (!fresh) continue;
+          lastLogAt = Date.now();
+          output += fresh;
+          const stream = log.stream === "stderr" ? process.stderr : process.stdout;
+          stream.write(fresh);
+        }
+      } catch (error) {
+        if (!logsAbort.signal.aborted && !finished) {
+          console.error(`\nLog stream disconnected; reconnecting. ${error instanceof Error ? error.message : String(error)}`);
+          await sleep(2_000);
+        }
       }
-    } catch (error) {
-      if (!logsAbort.signal.aborted) {
-        console.error(`\nLog stream failed; still waiting for OpenCode result. ${error instanceof Error ? error.message : String(error)}`);
-      }
+      if (!finished && !logsAbort.signal.aborted) await sleep(1_000);
     }
   })();
 
-  let finished: CommandFinished;
+  let result: CommandFinished;
   try {
-    finished = await waitPromise;
+    result = await waitPromise;
   } finally {
     logsAbort.abort();
     clearInterval(heartbeat);
     await logsPromise;
   }
 
-  return { output, finished };
+  return { output, finished: result };
 }
 
 export function usageCostRows(usage: AiGatewayUsage, pricing: ModelPricing) {

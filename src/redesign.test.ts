@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   aliasHostForRedesignUrl,
+  appendWithoutReplay,
   buildPrompt,
   buildResearchPrompt,
   buildSitePrompt,
@@ -88,6 +89,10 @@ assert.equal(
   aliasHostForRedesignUrl("https://acme.redesign.business", "https://acme.redesign.business"),
   undefined,
 );
+
+assert.equal(appendWithoutReplay("hello world", "world again"), " again");
+assert.equal(appendWithoutReplay("hello world", "hello world"), "");
+assert.equal(appendWithoutReplay("hello world", "fresh"), "fresh");
 
 const usageRows = usageCostRows({
   inputTokens: 1000,
