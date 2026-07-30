@@ -51,3 +51,7 @@ npm run stop -- --sandbox <sandbox>
 ```
 
 Skipped: dashboard, queue, workflow, branch previews, automated tests. Add them when this pilot proves they are needed.
+
+## Log Relay
+
+`log-relay/` is a small Cloudflare Worker/Hono project for durable WebSocket log streaming. It keeps one Durable Object per redesign run id, accepts writer and reader sockets, and replays recent messages with `after=<seq>`.

@@ -6,3 +6,4 @@ runs/
 .vercel
 .env*
 !.env.example
+log-relay/.dev.vars
