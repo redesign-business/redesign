@@ -23,13 +23,16 @@ type Pricing = {
   cacheWrite: number;
 };
 
+type PermissionConfig = "allow" | Record<string, unknown>;
+
 const WORKDIR = "/vercel/sandbox";
 const OPENCODE_BIN = "/home/vercel-sandbox/.opencode/node_modules/.bin/opencode";
-const LOG_RELAY_WRAPPER_PATH = "/tmp/redesign-log-relay-wrapper.mjs";
 const TEMPLATE_REPO = "https://github.com/redesign-business/template.git";
 const RESEARCH_MODEL = "deepseek/deepseek-v4-pro";
 const DRAFT_MODEL = "openai/gpt-5.6-sol";
 const REPAIR_MODEL = "deepseek/deepseek-v4-pro";
+const RESEARCH_AGENT = "research";
+const DRAFT_AGENT = "draft";
 const MAX_PHASE_CONTINUES = Number(process.env.REDESIGN_MAX_PHASE_CONTINUES ?? 5);
 const MAX_BUILD_REPAIRS = Number(process.env.REDESIGN_MAX_BUILD_REPAIRS ?? 5);
 
@@ -62,7 +65,7 @@ function outputTail(output: string, maxChars = 4000) {
 
 function buildResearchPrompt() {
   return [
-    `Extract proof for ${originalUrl}.`,
+    "Read raw.md and public/images/manifest.json. Then create proof.md.",
     "",
     `Project slug: ${slug}`,
     `GitHub repo: ${repoUrl}`,
@@ -71,32 +74,28 @@ function buildResearchPrompt() {
     "raw.md already contains a simple crawl of same-domain pages converted from HTML to Markdown.",
     "public/images/manifest.json lists downloaded images with page and section context.",
     "",
-    "Make a proof.md that directly copies and organizes all the business's demonstrated proof from raw.md. Examples of demonstrated proof are completed work, testimonials, awards, statistics, guarantees, credentials, press, partnerships, and anything the business has or has done that makes a potential customer trust them. Do not invent proof.",
-    "Commit and push proof.md.",
+    "Make proof.md directly copy and organize all the business's demonstrated proof from raw.md. Examples of demonstrated proof are completed work, testimonials, awards, statistics, guarantees, credentials, press, partnerships, and anything the business has or has done that makes a potential customer trust them. Do not invent proof.",
     "",
-    "You are done when proof.md is pushed to GitHub.",
+    "You are done when proof.md is created. Don't run commands, clone, commit, push, search, or read other files.",
   ].join("\n");
 }
 
 function buildDraftPrompt() {
   return [
-    "Build the first draft of the website from proof.md and public/images/manifest.json.",
-    "",
-    "Use this local skill file:",
-    "1. .opencode/skills/nextjs-site-building/SKILL.md",
+    "Read proof.md and public/images/manifest.json. Then create app/page.tsx.",
     "",
     `Project slug: ${slug}`,
     `GitHub repo: ${repoUrl}`,
     `Original URL: ${originalUrl}`,
     "",
     "Task:",
-    "Build the site in page.tsx. Use the business's unique proof to inspire the design.",
+    "Build the site in app/page.tsx. Use the business's unique proof to inspire the design.",
     "Use image localPath values from public/images/manifest.json. Use the page title, nearest heading, surrounding context, filename, and source page to infer what each image was doing on the original site.",
     "Typical structure: nav, hero, several proof sections, FAQ, final CTA, footer.",
     "No text-only sections except nav, banners, the bar below hero, and footer. Do not repeat images or other media.",
     "There is one CTA; use it everywhere.",
     "",
-    "You are done when page.tsx is created. Don't build, commit, or push.",
+    "You are done when app/page.tsx is created. Don't run commands, build, commit, push, search, or read other files.",
   ].join("\n");
 }
 
@@ -118,18 +117,61 @@ function isBudgetFailure(output: string) {
   return /budget|quota|limit|insufficient funds|payment required/i.test(output);
 }
 
-async function run(command: string, args: string[], options: { cwd?: string; env?: Record<string, string>; allowFailure?: boolean } = {}) {
+const researchPermission = {
+  read: {
+    "*": "deny",
+    "raw.md": "allow",
+    "public/images/manifest.json": "allow",
+  },
+  edit: {
+    "*": "deny",
+    "proof.md": "allow",
+  },
+  glob: "deny",
+  grep: "deny",
+  list: "deny",
+  bash: "deny",
+  task: "deny",
+  skill: "deny",
+  webfetch: "deny",
+  websearch: "deny",
+  external_directory: "deny",
+} satisfies PermissionConfig;
+
+const draftPermission = {
+  read: {
+    "*": "deny",
+    "proof.md": "allow",
+    "public/images/manifest.json": "allow",
+  },
+  edit: {
+    "*": "deny",
+    "app/page.tsx": "allow",
+  },
+  glob: "deny",
+  grep: "deny",
+  list: "deny",
+  bash: "deny",
+  task: "deny",
+  skill: "deny",
+  webfetch: "deny",
+  websearch: "deny",
+  external_directory: "deny",
+} satisfies PermissionConfig;
+
+async function run(command: string, args: string[], options: { cwd?: string; env?: Record<string, string>; allowFailure?: boolean; interactive?: boolean } = {}) {
   return new Promise<{ output: string; exitCode: number | null }>((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd ?? WORKDIR,
       env: { ...process.env, ...options.env },
+      stdio: [options.interactive ? "inherit" : "pipe", "pipe", "pipe"],
     });
     let output = "";
-    child.stdout.on("data", (chunk: Buffer) => {
+    child.stdout?.on("data", (chunk: Buffer) => {
       output += chunk;
       process.stdout.write(chunk);
     });
-    child.stderr.on("data", (chunk: Buffer) => {
+    child.stderr?.on("data", (chunk: Buffer) => {
       output += chunk;
       process.stderr.write(chunk);
     });
@@ -160,6 +202,15 @@ async function updateRun(fields: Record<string, unknown>) {
   }
   const next = { ...previous, ...fields };
   await write(path, `${JSON.stringify(next, null, 2)}\n`);
+  await sh([
+    "git add redesign-run.json",
+    "git commit -m 'chore: update redesign run status' || true",
+    "git push",
+  ].join("\n"));
+}
+
+async function resetRun(fields: Record<string, unknown>) {
+  await write(join(WORKDIR, "redesign-run.json"), `${JSON.stringify(fields, null, 2)}\n`);
   await sh([
     "git add redesign-run.json",
     "git commit -m 'chore: update redesign run status' || true",
@@ -207,6 +258,20 @@ async function setupOpenCode() {
     $schema: "https://opencode.ai/config.json",
     enabled_providers: ["vercel"],
     model: opencodeModel(RESEARCH_MODEL),
+    agent: {
+      [RESEARCH_AGENT]: {
+        model: opencodeModel(RESEARCH_MODEL),
+        mode: "primary",
+        maxSteps: 8,
+        permission: researchPermission,
+      },
+      [DRAFT_AGENT]: {
+        model: opencodeModel(DRAFT_MODEL),
+        mode: "primary",
+        maxSteps: 4,
+        permission: draftPermission,
+      },
+    },
     provider: {
       vercel: {
         npm: "@ai-sdk/gateway",
@@ -216,11 +281,6 @@ async function setupOpenCode() {
       },
     },
   }, null, 2));
-  await sh("mkdir -p .opencode/skills/nextjs-site-building");
-  await write(
-    join(WORKDIR, ".opencode/skills/nextjs-site-building/SKILL.md"),
-    await readFile("/tmp/redesign-runner/skills/nextjs-site-building/SKILL.md"),
-  );
 }
 
 async function collectResearch() {
@@ -231,18 +291,7 @@ async function collectResearch() {
   await commitAll("chore: add scraped research inputs");
 }
 
-function opencodeCommand(args: string[], phase: string) {
-  if (process.env.LOG_RELAY_URL && process.env.LOG_RELAY_TOKEN && process.env.LOG_RELAY_RUN_ID) {
-    return {
-      command: "node",
-      args: [LOG_RELAY_WRAPPER_PATH, OPENCODE_BIN, ...args],
-      env: { LOG_RELAY_PHASE: phase },
-    };
-  }
-  return { command: OPENCODE_BIN, args, env: {} as Record<string, string> };
-}
-
-async function runOpenCodePhase(phase: string, model: string, args: string[]) {
+async function runOpenCodePhase(phase: string, model: string, args: string[], options: { agent?: string } = {}) {
   const attempts: string[] = [];
   let output = "";
   let currentArgs = args;
@@ -250,14 +299,13 @@ async function runOpenCodePhase(phase: string, model: string, args: string[]) {
   for (let retry = 0; retry <= MAX_PHASE_CONTINUES; retry += 1) {
     if (retry > 0) {
       console.error(`\n${phase} exited before completion; retrying with OpenCode continue (${retry}/${MAX_PHASE_CONTINUES}).`);
-      currentArgs = ["run", "continue", "--continue", "--auto", "--dir", WORKDIR, "--model", opencodeModel(model)];
+      currentArgs = ["run", "continue", "--continue", "--auto", "--dir", WORKDIR, options.agent ? "--agent" : "--model", options.agent ?? opencodeModel(model)];
     }
-    const { command, args: commandArgs, env } = opencodeCommand(currentArgs, phase);
     const id = `${phase}-${randomUUID().slice(0, 8)}`;
     attempts.push(id);
     await updateRun({ phase, [`${phase}Attempts`]: attempts });
 
-    const result = await run(command, commandArgs, { cwd: WORKDIR, env, allowFailure: true });
+    const result = await run(OPENCODE_BIN, currentArgs, { cwd: WORKDIR, allowFailure: true, interactive: true });
     output += result.output;
     if (result.exitCode === 0) return { output, attempts };
     if (isBudgetFailure(result.output)) throw new Error(`${phase} failed with budget/quota error\n${outputTail(result.output)}`);
@@ -298,10 +346,11 @@ async function deploy() {
     "if [ -n \"${VERCEL_TEAM_ID:-}\" ]; then scope=(--scope \"$VERCEL_TEAM_ID\"); fi",
     "if [ -n \"${VERCEL_TEAM_ID:-}\" ]; then team=(--team \"$VERCEL_TEAM_ID\"); fi",
     "npx --yes vercel link --yes --project \"$REDESIGN_SLUG\" \"${team[@]}\"",
-    "npx --yes vercel deploy --yes \"${scope[@]}\" | tee /tmp/vercel-deploy.out",
+    "npx --yes vercel deploy --yes --no-wait \"${scope[@]}\" | tee /tmp/vercel-deploy.out",
     "deployment_url=$(grep -Eo 'https://[^[:space:]]+\\.vercel\\.app[^[:space:]]*' /tmp/vercel-deploy.out | tail -n 1)",
     "[ -n \"$deployment_url\" ]",
     "echo \"Deployment URL: $deployment_url\"",
+    "npx --yes vercel inspect \"$deployment_url\" --wait --timeout 5m \"${scope[@]}\" | tee /tmp/vercel-inspect.out",
     "npx --yes vercel domains add \"$REDESIGN_HOST\" \"$REDESIGN_SLUG\" --force \"${scope[@]}\" || true",
     "npx --yes vercel alias set \"$deployment_url\" \"$REDESIGN_HOST\" \"${scope[@]}\"",
     "echo \"Redesign URL: https://$REDESIGN_HOST\"",
@@ -314,7 +363,7 @@ async function deploy() {
   return extractRedesignUrl(result.output) ?? expectedRedesignUrl;
 }
 
-async function commandOutput(command: string, args: string[], cwd = WORKDIR) {
+async function capture(command: string, args: string[], cwd = WORKDIR) {
   return new Promise<string>((resolve, reject) => {
     const child = spawn(command, args, { cwd });
     let stdout = "";
@@ -354,8 +403,9 @@ async function modelPricing(model: string) {
 }
 
 async function estimateUsage() {
+  await sh("command -v sqlite3 >/dev/null || sudo dnf install -y sqlite");
   const dbPath = "/home/vercel-sandbox/.local/share/opencode/opencode.db";
-  const json = await commandOutput("sqlite3", ["-json", dbPath, [
+  const json = await capture("sqlite3", ["-json", dbPath, [
     "select json_extract(model,'$.id') as model,",
     "sum(tokens_input) as input_tokens,",
     "sum(tokens_output) as output_tokens,",
@@ -429,7 +479,7 @@ async function deleteAiGatewayKey() {
 
 async function main() {
   await setupGit();
-  await updateRun({
+  await resetRun({
     slug,
     originalUrl,
     repoUrl,
@@ -456,10 +506,11 @@ async function main() {
   await write("/tmp/draft-prompt.md", buildDraftPrompt());
 
   await updateRun({ phase: "research" });
-  const research = await runOpenCodePhase("research", RESEARCH_MODEL, ["run", "Follow the attached redesign prompt.", "--auto", "--dir", WORKDIR, "--title", `Research ${slug}`, "--model", opencodeModel(RESEARCH_MODEL), "--file", "/tmp/research-prompt.md"]);
+  const research = await runOpenCodePhase("research", RESEARCH_MODEL, ["run", "Follow the attached redesign prompt.", "--auto", "--dir", WORKDIR, "--title", `Research ${slug}`, "--agent", RESEARCH_AGENT, "--file", "/tmp/research-prompt.md"], { agent: RESEARCH_AGENT });
+  await commitAll("chore: add proof");
 
   await updateRun({ phase: "draft", researchAttempts: research.attempts });
-  const draft = await runOpenCodePhase("draft", DRAFT_MODEL, ["run", "git pull --ff-only && follow the attached first-draft prompt.", "--auto", "--dir", WORKDIR, "--title", `Draft ${slug}`, "--model", opencodeModel(DRAFT_MODEL), "--file", "/tmp/draft-prompt.md"]);
+  const draft = await runOpenCodePhase("draft", DRAFT_MODEL, ["run", "Follow the attached first-draft prompt.", "--auto", "--dir", WORKDIR, "--title", `Draft ${slug}`, "--agent", DRAFT_AGENT, "--file", "/tmp/draft-prompt.md"], { agent: DRAFT_AGENT });
 
   await updateRun({ phase: "build", draftAttempts: draft.attempts });
   const build = await buildWithRepairs();

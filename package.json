@@ -5,11 +5,9 @@
   "type": "module",
   "scripts": {
     "redesign": "tsx src/cli.ts redesign",
-    "continue": "tsx src/cli.ts continue",
-    "logs": "tsx src/cli.ts logs",
-    "usage": "tsx src/cli.ts usage",
+    "attach": "tsx src/cli.ts attach",
     "stop": "tsx src/cli.ts stop",
-    "test": "node --check src/log-relay-wrapper.mjs && tsx src/redesign.test.ts",
+    "test": "tsx src/redesign.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

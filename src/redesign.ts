@@ -1,10 +1,9 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { config as loadEnv } from "dotenv";
-import { Command, CommandFinished, Sandbox } from "@vercel/sandbox";
+import { Sandbox } from "@vercel/sandbox";
 
 loadEnv({ path: ".env.local", quiet: true });
 
@@ -12,62 +11,28 @@ export type RedesignOptions = {
   site: string;
   slug?: string;
   timeoutMinutes?: number;
-  keepSandbox?: boolean;
 };
 
 export type RedesignResult = {
   sandbox: string;
-  command: string;
+  tmuxSession: string;
   slug: string;
   originalUrl: string;
   repoUrl: string;
   expectedRedesignUrl: string;
   model: string;
   aiGatewayBudget: number;
-  metricsPath: string;
-  logRelayRunId?: string;
 };
 
-type AiGatewayUsage = {
-  model?: string;
-  totalCost: number;
-  marketCost: number;
-  inputTokens: number;
-  outputTokens: number;
-  cachedInputTokens: number;
-  cacheCreationInputTokens: number;
-  reasoningTokens: number;
-  requestCount: number;
-};
-
-type ModelPricing = {
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-};
-
-type RunMetrics = RedesignResult & {
-  aiGatewayKeyId?: string;
-  aiGatewayKeyName: string;
-  startedAt: string;
-  endedAt?: string;
-  status: "running" | "failed" | "succeeded";
-  [key: string]: unknown;
-};
-
-const OPENCODE_BIN = "/home/vercel-sandbox/.opencode/node_modules/.bin/opencode";
 const WORKDIR = "/vercel/sandbox";
-const LOG_RELAY_WRAPPER_PATH = "/tmp/redesign-log-relay-wrapper.mjs";
+const TMUX_SESSION = "redesign";
 const DEFAULT_RESEARCH_MODEL = "deepseek/deepseek-v4-pro";
 const DEFAULT_DRAFT_MODEL = "openai/gpt-5.6-sol";
 const DEFAULT_IMPLEMENTATION_MODEL = "deepseek/deepseek-v4-pro";
 const DEFAULT_GITHUB_OWNER = "redesign-business";
 const DEFAULT_BASE_DOMAIN = "redesign.business";
 const DEFAULT_AI_GATEWAY_BUDGET = 1;
-const LOG_STREAM_IDLE_MS = 10_000;
-const LOG_RELAY_RECONNECT_MS = 500;
-const MAX_PHASE_CONTINUES = Number(process.env.REDESIGN_MAX_PHASE_CONTINUES ?? 5);
+const SANDBOX_CLI_VERSION = "3.5.5";
 
 export function parseArgs(argv: string[]) {
   const args = new Map<string, string>();
@@ -80,18 +45,12 @@ export function parseArgs(argv: string[]) {
       continue;
     }
 
-    const name = key.slice(2);
-    if (name === "keep-sandbox") {
-      args.set(name, "true");
-      continue;
-    }
-
     const value = argv[i + 1];
     if (!value || value.startsWith("--")) {
       throw new Error(`Missing value for ${key}`);
     }
 
-    args.set(name, value);
+    args.set(key.slice(2), value);
     i += 1;
   }
 
@@ -132,630 +91,6 @@ export function makeSandboxName(slug: string) {
   return `redesign-${slug.slice(0, 32)}-${randomUUID().slice(0, 8)}`;
 }
 
-export function gatewayModelFromInput(model: string) {
-  return model.startsWith("vercel/") ? model.slice("vercel/".length) : model;
-}
-
-export function opencodeModelForGatewayModel(model: string) {
-  return `vercel/${gatewayModelFromInput(model)}`;
-}
-
-function modelForContinue(previous: RunMetrics) {
-  if (previous.phase === "draft" && typeof previous.draftModel === "string") return gatewayModelFromInput(previous.draftModel);
-  if (previous.phase === "implementation" && typeof previous.implementationModel === "string") return gatewayModelFromInput(previous.implementationModel);
-  return gatewayModelFromInput(typeof previous.implementationModel === "string" ? previous.implementationModel : previous.model);
-}
-
-export function buildResearchPrompt(options: {
-  site: string;
-  slug: string;
-  repoUrl: string;
-}) {
-  return [
-    `Extract proof for ${options.site}.`,
-    "",
-    `Project slug: ${options.slug}`,
-    `GitHub repo: ${options.repoUrl}`,
-    `Original URL: ${options.site}`,
-    "",
-    "raw.md already contains a simple crawl of same-domain pages converted from HTML to Markdown.",
-    "public/images/manifest.json lists downloaded images with page and section context.",
-    "",
-    "Make a proof.md that directly copies and organizes all the business's demonstrated proof from raw.md. Examples of demonstrated proof are completed work, testimonials, awards, statistics, guarantees, credentials, press, partnerships, and anything the business has or has done that makes a potential customer trust them. Do not invent proof.",
-    "Commit and push proof.md.",
-    "",
-    "You are done when proof.md is pushed to GitHub.",
-  ].join("\n");
-}
-
-export function buildDraftPrompt(options: {
-  site: string;
-  slug: string;
-  repoUrl: string;
-}) {
-  return [
-    "Build the first draft of the website from proof.md and public/images/manifest.json.",
-    "",
-    "Use this local skill file:",
-    "1. .opencode/skills/nextjs-site-building/SKILL.md",
-    "",
-    `Project slug: ${options.slug}`,
-    `GitHub repo: ${options.repoUrl}`,
-    `Original URL: ${options.site}`,
-    "",
-    "Task:",
-    "Build the site in page.tsx. Use the business's unique proof to inspire the design.",
-    "Use image localPath values from public/images/manifest.json. Use the page title, nearest heading, surrounding context, filename, and source page to infer what each image was doing on the original site.",
-    "Typical structure: nav, hero, several proof sections, FAQ, final CTA, footer.",
-    "No text-only sections except nav, banners, the bar below hero, and footer. Do not repeat images or other media.",
-    "There is one CTA; use it everywhere.",
-    "",
-    "You are done when page.tsx is created. Don't build, commit, or push.",
-  ].join("\n");
-}
-
-export function buildRepairPrompt(buildOutput: string) {
-  return [
-    "Fix the exact production build error below.",
-    "",
-    "Rules:",
-    "Only change files required to make the build pass.",
-    "Keep the current design intact.",
-    "Do not commit, push, deploy, or redesign the page.",
-    "",
-    "Build output:",
-    buildOutput,
-  ].join("\n");
-}
-
-export function extractRedesignUrl(output: string) {
-  const matches = [...output.matchAll(/Redesign URL:\s*(https?:\/\/[^\s]+)/gi)];
-  return matches.at(-1)?.[1];
-}
-
-export function aliasHostForRedesignUrl(deploymentUrl: string | undefined, expectedRedesignUrl: string) {
-  if (!deploymentUrl || deploymentUrl === expectedRedesignUrl || !deploymentUrl.includes(".vercel.app")) {
-    return undefined;
-  }
-  return new URL(expectedRedesignUrl).host;
-}
-
-function money(value: number) {
-  return `$${value.toFixed(6)}`;
-}
-
-function outputTail(output: string, maxChars = 4000) {
-  return output.slice(Math.max(0, output.length - maxChars));
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-export function appendWithoutReplay(output: string, data: string) {
-  let overlap = Math.min(output.length, data.length);
-  while (overlap > 0 && !output.endsWith(data.slice(0, overlap))) overlap--;
-  return data.slice(overlap);
-}
-
-type LogRelay = {
-  url: string;
-  token: string;
-  runId: string;
-  afterSeq: number;
-};
-
-type RelayMessage = {
-  seq?: number;
-  stream?: "stdout" | "stderr" | "status";
-  data?: string;
-};
-
-type WebSocketLike = {
-  addEventListener: (
-    event: "open" | "message" | "error" | "close",
-    listener: (event: { data?: string; error?: unknown }) => void,
-    options?: { once?: boolean },
-  ) => void;
-  close: () => void;
-};
-
-const WebSocketCtor = globalThis.WebSocket as unknown as {
-  new (url: string): WebSocketLike;
-};
-
-function logRelayFromEnv(slug: string): LogRelay | undefined {
-  const url = process.env.LOG_RELAY_URL;
-  const token = process.env.LOG_RELAY_TOKEN;
-  if (!url || !token) return undefined;
-
-  return {
-    url: url.replace(/\/+$/, ""),
-    token,
-    runId: `${slug}-${randomUUID().slice(0, 8)}`,
-    afterSeq: 0,
-  };
-}
-
-function logRelaySocketUrl(relay: LogRelay, role: "reader" | "writer", phase?: string) {
-  const params = new URLSearchParams({
-    role,
-    token: relay.token,
-  });
-  if (role === "reader") params.set("after", String(relay.afterSeq));
-  if (phase) params.set("phase", phase);
-  return `${relay.url}/runs/${encodeURIComponent(relay.runId)}?${params}`;
-}
-
-function logRelayCommandEnv(relay: LogRelay, phase: string) {
-  return {
-    LOG_RELAY_URL: relay.url,
-    LOG_RELAY_TOKEN: relay.token,
-    LOG_RELAY_RUN_ID: relay.runId,
-    LOG_RELAY_PHASE: phase,
-  };
-}
-
-function opencodeCommand(args: string[], relay: LogRelay | undefined, phase: string, env?: Record<string, string>) {
-  const commandEnv = {
-    ...env,
-    ...(relay ? logRelayCommandEnv(relay, phase) : {}),
-  };
-
-  return {
-    cmd: relay ? "node" : OPENCODE_BIN,
-    args: relay ? [LOG_RELAY_WRAPPER_PATH, OPENCODE_BIN, ...args] : args,
-    detached: true,
-    env: Object.keys(commandEnv).length ? commandEnv : undefined,
-  };
-}
-
-export function isBudgetFailureOutput(output: string) {
-  return /budget|quota|limit|insufficient funds|payment required/i.test(output);
-}
-
-async function runOpenCodePhase(options: {
-  sandbox: Sandbox;
-  args: string[];
-  relay?: LogRelay;
-  phase: string;
-  model: string;
-  startMs: number;
-  onCommand?: (command: Command, attempts: string[]) => Promise<void>;
-}) {
-  const attempts: string[] = [];
-  let output = "";
-  let args = options.args;
-
-  for (let retry = 0; retry <= MAX_PHASE_CONTINUES; retry += 1) {
-    if (retry > 0) {
-      console.error(`\n${options.phase} exited before completion; retrying with OpenCode continue (${retry}/${MAX_PHASE_CONTINUES}).`);
-      args = ["run", "continue", "--continue", "--auto", "--dir", WORKDIR, "--model", opencodeModelForGatewayModel(options.model)];
-    }
-
-    const command = await options.sandbox.runCommand(opencodeCommand(args, options.relay, options.phase));
-    attempts.push(command.cmdId);
-    await options.onCommand?.(command, attempts);
-
-    const run = await streamUntilFinished(command, options.startMs, options.relay);
-    output += run.output;
-    if (run.finished.exitCode === 0) {
-      return { command, output, attempts };
-    }
-    if (isBudgetFailureOutput(run.output)) {
-      throw new Error(`${options.phase} phase failed with budget/quota error\n${outputTail(run.output)}`);
-    }
-  }
-
-  throw new Error(`${options.phase} phase failed after ${MAX_PHASE_CONTINUES} continue attempts\n${outputTail(output)}`);
-}
-
-function openRelayReader(relay: LogRelay) {
-  return new Promise<WebSocketLike>((resolve, reject) => {
-    const ws = new WebSocketCtor(logRelaySocketUrl(relay, "reader"));
-    const timer = setTimeout(() => {
-      ws.close();
-      reject(new Error("Log relay connect timeout"));
-    }, 5_000);
-
-    ws.addEventListener("open", () => {
-      clearTimeout(timer);
-      resolve(ws);
-    }, { once: true });
-    ws.addEventListener("error", (event) => {
-      clearTimeout(timer);
-      reject(event.error instanceof Error ? event.error : new Error("Log relay connect failed"));
-    }, { once: true });
-  });
-}
-
-function parseRelayMessage(data: string | undefined): RelayMessage | undefined {
-  if (!data) return undefined;
-  try {
-    const parsed = JSON.parse(data) as RelayMessage;
-    return typeof parsed.data === "string" ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-async function streamFromRelay(relay: LogRelay, finished: () => boolean, write: (data: string, stream?: string) => void) {
-  while (!finished()) {
-    let sawClose = false;
-    try {
-      const ws = await openRelayReader(relay);
-      ws.addEventListener("message", (event) => {
-        const message = parseRelayMessage(event.data);
-        if (!message) return;
-        if (typeof message.seq === "number") relay.afterSeq = Math.max(relay.afterSeq, message.seq);
-        write(message.data ?? "", message.stream);
-      });
-      await new Promise<void>((resolve) => {
-        ws.addEventListener("close", () => {
-          sawClose = true;
-          resolve();
-        }, { once: true });
-        ws.addEventListener("error", () => resolve(), { once: true });
-        const interval = setInterval(() => {
-          if (finished()) {
-            clearInterval(interval);
-            ws.close();
-            resolve();
-          }
-        }, 250);
-      });
-    } catch {
-      // The command still writes to Vercel logs. Reconnect quickly and fall back later if needed.
-    }
-    if (!finished() || sawClose) await sleep(LOG_RELAY_RECONNECT_MS);
-  }
-}
-
-async function waitForCommand(command: Command) {
-  while (true) {
-    try {
-      return await command.wait();
-    } catch (error) {
-      console.error(`\nCommand status check failed; retrying. ${error instanceof Error ? error.message : String(error)}`);
-      await sleep(5_000);
-    }
-  }
-}
-
-async function streamUntilFinished(command: Command, _startedAt: number, relay?: LogRelay) {
-  const logsAbort = new AbortController();
-  let output = "";
-  let finished = false;
-  const waitPromise = waitForCommand(command).finally(() => {
-    finished = true;
-  });
-
-  const write = (data: string, streamName?: string) => {
-    const fresh = appendWithoutReplay(output, data);
-    if (!fresh) return;
-    output += fresh;
-    const stream = streamName === "stderr" ? process.stderr : process.stdout;
-    stream.write(fresh);
-  };
-
-  if (relay) {
-    let result: CommandFinished;
-    try {
-      await Promise.race([
-        streamFromRelay(relay, () => finished, write),
-        waitPromise,
-      ]);
-      result = await waitPromise;
-    } finally {
-      logsAbort.abort();
-    }
-
-    try {
-      const finalOutput = await command.output("both");
-      if (!output) write(finalOutput);
-      else if (finalOutput.startsWith(output)) write(finalOutput.slice(output.length));
-    } catch {
-      // Relay already carried the live output. Command output is only a fallback/catch-up.
-    }
-
-    return { output, finished: result };
-  }
-
-  const logsPromise = (async () => {
-    while (!finished && !logsAbort.signal.aborted) {
-      const streamAbort = new AbortController();
-      let idleReconnect = false;
-      let idleTimer: ReturnType<typeof setTimeout> | undefined;
-      const resetIdleTimer = () => {
-        if (idleTimer) clearTimeout(idleTimer);
-        idleTimer = setTimeout(() => {
-          idleReconnect = true;
-          streamAbort.abort("Log stream idle");
-        }, LOG_STREAM_IDLE_MS);
-      };
-      const abortStream = () => streamAbort.abort(logsAbort.signal.reason);
-      logsAbort.signal.addEventListener("abort", abortStream, { once: true });
-      resetIdleTimer();
-
-      try {
-        for await (const log of command.logs({ signal: streamAbort.signal })) {
-          resetIdleTimer();
-          write(log.data, log.stream);
-        }
-      } catch (error) {
-        if (!logsAbort.signal.aborted && !finished) {
-          if (!idleReconnect) {
-            console.error(`\nLog stream disconnected; reconnecting. ${error instanceof Error ? error.message : String(error)}`);
-          }
-          await sleep(2_000);
-        }
-      } finally {
-        if (idleTimer) clearTimeout(idleTimer);
-        logsAbort.signal.removeEventListener("abort", abortStream);
-      }
-      if (!finished && !logsAbort.signal.aborted) await sleep(1_000);
-    }
-  })();
-
-  let result: CommandFinished;
-  try {
-    result = await waitPromise;
-  } finally {
-    logsAbort.abort();
-    await logsPromise;
-  }
-
-  return { output, finished: result };
-}
-
-async function estimateUsageForModel(usage: AiGatewayUsage) {
-  const pricing = await modelPricing(usage.model ?? "");
-  const totalCost =
-    usage.inputTokens * pricing.input +
-    usage.outputTokens * pricing.output +
-    usage.cachedInputTokens * pricing.cacheRead +
-    usage.cacheCreationInputTokens * pricing.cacheWrite;
-  return {
-    ...usage,
-    totalCost,
-    marketCost: totalCost,
-  };
-}
-
-function sumUsage(usages: AiGatewayUsage[]) {
-  return usages.reduce((sum, usage) => ({
-    totalCost: sum.totalCost + usage.totalCost,
-    marketCost: sum.marketCost + usage.marketCost,
-    inputTokens: sum.inputTokens + usage.inputTokens,
-    outputTokens: sum.outputTokens + usage.outputTokens,
-    cachedInputTokens: sum.cachedInputTokens + usage.cachedInputTokens,
-    cacheCreationInputTokens: sum.cacheCreationInputTokens + usage.cacheCreationInputTokens,
-    reasoningTokens: sum.reasoningTokens + usage.reasoningTokens,
-    requestCount: sum.requestCount + usage.requestCount,
-  }), {
-    totalCost: 0,
-    marketCost: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    cachedInputTokens: 0,
-    cacheCreationInputTokens: 0,
-    reasoningTokens: 0,
-    requestCount: 0,
-  } satisfies AiGatewayUsage);
-}
-
-async function localCommandOutput(command: string, args: string[]) {
-  return new Promise<string>((resolve, reject) => {
-    const child = spawn(command, args);
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk; });
-    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk; });
-    child.on("error", reject);
-    child.on("close", (code: number | null) => {
-      if (code === 0) resolve(stdout);
-      else reject(new Error(`${command} failed\n${stderr.trim()}`));
-    });
-  });
-}
-
-async function estimateOpenCodeUsage(sandbox: Sandbox, models?: string[]) {
-  const dir = await mkdtemp(join(tmpdir(), "redesign-opencode-"));
-  try {
-    const dbPath = join(dir, "opencode.db");
-    const downloaded = await sandbox.downloadFile(
-      { path: "/home/vercel-sandbox/.local/share/opencode/opencode.db" },
-      { path: dbPath },
-    );
-    if (!downloaded) return undefined;
-
-    const json = await localCommandOutput("sqlite3", ["-json", dbPath, [
-      "select json_extract(model,'$.id') as model,",
-      "sum(tokens_input) as input_tokens,",
-      "sum(tokens_output) as output_tokens,",
-      "sum(tokens_reasoning) as reasoning_tokens,",
-      "sum(tokens_cache_read) as cached_input_tokens,",
-      "sum(tokens_cache_write) as cache_creation_input_tokens,",
-      "count(*) as request_count",
-      "from session where model is not null group by 1",
-    ].join(" ")]);
-    const expected = models ? new Set(models) : undefined;
-    const rows = JSON.parse(json) as Array<{
-      model?: string;
-      input_tokens?: number;
-      output_tokens?: number;
-      reasoning_tokens?: number;
-      cached_input_tokens?: number;
-      cache_creation_input_tokens?: number;
-      request_count?: number;
-    }>;
-    const usage = await Promise.all(rows
-      .filter((row) => row.model && (!expected || expected.has(row.model)))
-      .map((row) => estimateUsageForModel({
-        model: row.model,
-        totalCost: 0,
-        marketCost: 0,
-        inputTokens: row.input_tokens ?? 0,
-        outputTokens: row.output_tokens ?? 0,
-        cachedInputTokens: row.cached_input_tokens ?? 0,
-        cacheCreationInputTokens: row.cache_creation_input_tokens ?? 0,
-        reasoningTokens: row.reasoning_tokens ?? 0,
-        requestCount: row.request_count ?? 0,
-      } satisfies AiGatewayUsage)));
-    return usage.length ? usage : undefined;
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-}
-
-async function modelPricing(model: string) {
-  const response = await fetch("https://ai-gateway.vercel.sh/v1/models");
-  if (!response.ok) throw new Error(`Model pricing lookup failed: ${response.statusText}`);
-
-  const json = await response.json() as {
-    data?: Array<{
-      id?: string;
-      pricing?: {
-        input?: string;
-        output?: string;
-        input_cache_read?: string;
-        input_cache_write?: string;
-      };
-    }>;
-  };
-  const pricing = json.data?.find((item) => item.id === model)?.pricing;
-  if (!pricing?.input || !pricing.output) throw new Error(`No pricing found for ${model}`);
-
-  return {
-    input: Number(pricing.input),
-    output: Number(pricing.output),
-    cacheRead: Number(pricing.input_cache_read ?? 0),
-    cacheWrite: Number(pricing.input_cache_write ?? 0),
-  } satisfies ModelPricing;
-}
-
-async function writeRunMetrics(path: string, data: unknown) {
-  await mkdir(join(process.cwd(), "runs"), { recursive: true });
-  await writeFile(path, `${JSON.stringify(data, null, 2)}\n`);
-}
-
-async function readRunMetrics(path: string) {
-  return JSON.parse(await readFile(path, "utf8")) as RunMetrics;
-}
-
-function withoutReportedUsage<T extends Record<string, unknown>>(metrics: T) {
-  const rest = { ...metrics };
-  delete rest.usage;
-  delete rest.pricing;
-  delete rest.usageTable;
-  delete rest.usageByModel;
-  delete rest.usageTables;
-  delete rest.totalUsage;
-  return rest;
-}
-
-async function pricingByModel(usages: AiGatewayUsage[]) {
-  return Object.fromEntries(await Promise.all(usages.map(async (usage) => [
-    usage.model ?? "",
-    await modelPricing(usage.model ?? ""),
-  ])));
-}
-
-export async function refreshUsage(metricsPath: string) {
-  const metrics = JSON.parse(await readFile(metricsPath, "utf8")) as {
-    sandbox: string;
-    slug: string;
-    model: string;
-    status?: string;
-    researchModel?: string;
-    draftModel?: string;
-    implementationModel?: string;
-    aiGatewayKeyId?: string;
-    aiGatewayKeyName: string;
-    startedAt: string;
-    endedAt: string;
-    [key: string]: unknown;
-  };
-  if (!metrics.sandbox) throw new Error("Metrics file is missing sandbox");
-
-  const sandbox = await Sandbox.get({ name: metrics.sandbox });
-  const models = [metrics.researchModel, metrics.draftModel, metrics.implementationModel]
-    .filter((model): model is string => typeof model === "string");
-  if (models.length) {
-    const usageByModel = await estimateOpenCodeUsage(sandbox, [...new Set(models)]);
-    if (!usageByModel) throw new Error("OpenCode usage is not available");
-
-    const pricing = await pricingByModel(usageByModel);
-    const totalUsage = sumUsage(usageByModel);
-    const nextMetrics = {
-      ...withoutReportedUsage(metrics),
-      estimatedUsageByModel: usageByModel,
-      estimatedPricingByModel: pricing,
-      estimatedTotalUsage: totalUsage,
-    };
-    await writeRunMetrics(metricsPath, nextMetrics);
-
-    for (const usage of usageByModel) {
-      console.log(`\nModel: ${usage.model}`);
-      console.log(`Tokens: input ${usage.inputTokens.toLocaleString("en-US")}, output ${usage.outputTokens.toLocaleString("en-US")}, cache read ${usage.cachedInputTokens.toLocaleString("en-US")}, cache write ${usage.cacheCreationInputTokens.toLocaleString("en-US")}`);
-      console.log(`OpenCode sessions: ${usage.requestCount}`);
-      console.log(`Estimated total: ${money(usage.totalCost)}`);
-    }
-    console.log(`\nCombined OpenCode sessions: ${totalUsage.requestCount}`);
-    console.log(`Combined estimated total: ${money(totalUsage.totalCost)}`);
-    return nextMetrics;
-  }
-
-  const usage = (await estimateOpenCodeUsage(sandbox, [metrics.model]))?.[0];
-  if (!usage) throw new Error("OpenCode usage is not available");
-
-  const pricing = await modelPricing(metrics.model);
-  const nextMetrics = {
-    ...withoutReportedUsage(metrics),
-    estimatedUsage: usage,
-    estimatedPricing: pricing,
-  };
-  await writeRunMetrics(metricsPath, nextMetrics);
-
-  console.log(`Tokens: input ${usage.inputTokens.toLocaleString("en-US")}, output ${usage.outputTokens.toLocaleString("en-US")}, cache read ${usage.cachedInputTokens.toLocaleString("en-US")}, cache write ${usage.cacheCreationInputTokens.toLocaleString("en-US")}`);
-  console.log(`OpenCode sessions: ${usage.requestCount}`);
-  console.log(`Estimated total: ${money(usage.totalCost)}`);
-  return nextMetrics;
-}
-
-async function runVercel(args: string[]) {
-  const token = process.env.VERCEL_TOKEN;
-  if (!token) throw new Error("Missing VERCEL_TOKEN");
-
-  const command = [...args, "--token", token];
-  const teamId = process.env.VERCEL_TEAM_ID;
-  if (teamId) command.push("--scope", teamId);
-
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn("npx", ["vercel", ...command]);
-    let output = "";
-    child.stdout.on("data", (chunk: Buffer) => { output += chunk; });
-    child.stderr.on("data", (chunk: Buffer) => { output += chunk; });
-    child.on("error", reject);
-    child.on("close", (code: number | null) => {
-      if (code === 0) resolve();
-      else reject(new Error(`Vercel command failed\n${output.trim()}`));
-    });
-  });
-}
-
-async function aliasRedesignUrl(deploymentUrl: string | undefined, expectedRedesignUrl: string, slug: string) {
-  const host = aliasHostForRedesignUrl(deploymentUrl, expectedRedesignUrl);
-  if (!host || !deploymentUrl) {
-    return expectedRedesignUrl;
-  }
-
-  await runVercel(["domains", "add", host, slug, "--force"]);
-  await runVercel(["alias", "set", deploymentUrl, host]);
-
-  return expectedRedesignUrl;
-}
-
 async function must(command: Awaited<ReturnType<Sandbox["runCommand"]>>, label: string) {
   if (command.exitCode === 0) return;
   throw new Error(`${label} failed\n${await command.output("both")}`);
@@ -778,10 +113,7 @@ async function createGithubRepo(slug: string) {
     if (json.clone_url && json.html_url) return { cloneUrl: json.clone_url, htmlUrl: json.html_url };
   }
 
-  const orgEndpoint = `https://api.github.com/orgs/${owner}/repos`;
-  const userEndpoint = "https://api.github.com/user/repos";
-  const endpoint = owner ? orgEndpoint : userEndpoint;
-  const response = await fetch(endpoint, {
+  const response = await fetch(`https://api.github.com/orgs/${owner}/repos`, {
     method: "POST",
     headers: {
       Accept: "application/vnd.github+json",
@@ -798,26 +130,22 @@ async function createGithubRepo(slug: string) {
   });
 
   const json = await response.json() as { clone_url?: string; html_url?: string; message?: string };
-  if (!response.ok) {
-    throw new Error(`GitHub repo create failed: ${json.message ?? response.statusText}`);
-  }
+  if (!response.ok) throw new Error(`GitHub repo create failed: ${json.message ?? response.statusText}`);
   if (!json.clone_url || !json.html_url) throw new Error("GitHub did not return repo URLs");
-
   return { cloneUrl: json.clone_url, htmlUrl: json.html_url };
 }
 
-async function createAiGatewayKey(slug: string, budgetOverride?: number) {
+async function createAiGatewayKey(slug: string) {
   const token = process.env.VERCEL_TOKEN;
   if (!token) throw new Error("Missing VERCEL_TOKEN");
 
   const teamId = process.env.VERCEL_TEAM_ID;
-  const budget = budgetOverride ?? Number(process.env.AI_GATEWAY_JOB_BUDGET ?? DEFAULT_AI_GATEWAY_BUDGET);
+  const budget = Number(process.env.AI_GATEWAY_JOB_BUDGET ?? DEFAULT_AI_GATEWAY_BUDGET);
   if (!Number.isFinite(budget) || budget < 1) throw new Error("AI_GATEWAY_JOB_BUDGET must be at least 1");
 
   const params = new URLSearchParams();
   if (teamId) params.set("teamId", teamId);
   const name = `redesign-${slug}-${Date.now().toString(36)}`;
-
   const response = await fetch(`https://api.vercel.com/v1/api-keys${params.size ? `?${params}` : ""}`, {
     method: "POST",
     headers: {
@@ -838,12 +166,9 @@ async function createAiGatewayKey(slug: string, budgetOverride?: number) {
     error?: { message?: string };
     message?: string;
   };
-  if (!response.ok) {
-    throw new Error(`AI Gateway key create failed: ${json.error?.message ?? json.message ?? response.statusText}`);
-  }
+  if (!response.ok) throw new Error(`AI Gateway key create failed: ${json.error?.message ?? json.message ?? response.statusText}`);
   const id = json.id ?? json.apiKey?.id;
   if (!json.apiKeyString || !id) throw new Error("Vercel did not return an AI Gateway key");
-
   return { id, key: json.apiKeyString, name, budget };
 }
 
@@ -853,149 +178,115 @@ async function deleteAiGatewayKey(id: string) {
 
   const params = new URLSearchParams();
   if (process.env.VERCEL_TEAM_ID) params.set("teamId", process.env.VERCEL_TEAM_ID);
-
-  try {
-    await fetch(`https://api.vercel.com/v1/api-keys/${id}${params.size ? `?${params}` : ""}`, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${token}` },
-    });
-  } catch {
-    // Best-effort cleanup. The per-job budget is still the safety rail.
-  }
+  await fetch(`https://api.vercel.com/v1/api-keys/${id}${params.size ? `?${params}` : ""}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  }).catch(() => {});
 }
 
-async function localLogRelayWrapper() {
-  return Buffer.from(await readFile(join(process.cwd(), "src", "log-relay-wrapper.mjs"), "utf8"));
-}
-
-export async function continueRedesign(previousMetricsPath: string): Promise<RedesignResult> {
-  const previous = await readRunMetrics(previousMetricsPath);
-  if (previous.status === "succeeded") {
-    throw new Error(`Run already succeeded: ${previous.redesignUrl ?? previous.expectedRedesignUrl}`);
-  }
-
-  const model = modelForContinue(previous);
-  const opencodeModel = opencodeModelForGatewayModel(model);
-  const budget = Number(previous.aiGatewayBudget || DEFAULT_AI_GATEWAY_BUDGET);
-  const relay = logRelayFromEnv(previous.slug);
-  const startMs = Date.now();
-  const metricsPath = join(process.cwd(), "runs", `${new Date(startMs).toISOString().replace(/[:.]/g, "-")}-${previous.slug}-continue.json`);
-  const aiGatewayKey = previous.aiGatewayKeyDeletedAt ? await createAiGatewayKey(`${previous.slug}-continue`, budget) : undefined;
-  const aiGatewayKeyId = aiGatewayKey?.id ?? previous.aiGatewayKeyId;
-  const aiGatewayKeyName = aiGatewayKey?.name ?? previous.aiGatewayKeyName;
-
-  const result: RedesignResult = {
-    sandbox: previous.sandbox,
-    command: "",
-    slug: previous.slug,
-    originalUrl: previous.originalUrl,
-    repoUrl: previous.repoUrl,
-    expectedRedesignUrl: previous.expectedRedesignUrl,
-    model,
-    aiGatewayBudget: budget,
-    metricsPath,
-    logRelayRunId: relay?.runId,
+function runnerEnv(options: {
+  aiGatewayKey: Awaited<ReturnType<typeof createAiGatewayKey>>;
+  githubToken: string;
+  originalUrl: string;
+  slug: string;
+  repoUrl: string;
+  expectedRedesignUrl: string;
+  startedAt: string;
+  sandboxName: string;
+}) {
+  return {
+    AI_GATEWAY_API_KEY: options.aiGatewayKey.key,
+    GITHUB_TOKEN: options.githubToken,
+    GIT_USERNAME: "x-access-token",
+    GIT_PASSWORD: options.githubToken,
+    GH_TOKEN: options.githubToken,
+    VERCEL_TOKEN: process.env.VERCEL_TOKEN ?? "",
+    VERCEL_TEAM_ID: process.env.VERCEL_TEAM_ID ?? "",
+    OPENCODE_DISABLE_AUTOUPDATE: "true",
+    OPENCODE_DISABLE_MODELS_FETCH: "true",
+    REDESIGN_SITE: options.originalUrl,
+    REDESIGN_SLUG: options.slug,
+    REDESIGN_REPO_URL: options.repoUrl,
+    REDESIGN_EXPECTED_URL: options.expectedRedesignUrl,
+    REDESIGN_STARTED_AT: options.startedAt,
+    REDESIGN_SANDBOX: options.sandboxName,
+    AI_GATEWAY_KEY_ID: options.aiGatewayKey.id,
+    AI_GATEWAY_KEY_NAME: options.aiGatewayKey.name,
+    AI_GATEWAY_BUDGET: String(options.aiGatewayKey.budget),
   };
+}
 
-  try {
-    const sandbox = await Sandbox.get({ name: previous.sandbox });
-    await sandbox.runCommand("bash", ["-lc", "pkill -f '[o]pencode' || true"]);
-    if (relay) {
-      await sandbox.writeFiles([{ path: LOG_RELAY_WRAPPER_PATH, content: await localLogRelayWrapper() }]);
-    }
+async function uploadRunner(sandbox: Sandbox) {
+  await must(await sandbox.runCommand("mkdir", ["-p", "/tmp/redesign-runner/src"]), "runner mkdir");
+  await sandbox.writeFiles([
+    {
+      path: "/tmp/redesign-runner/package.json",
+      content: Buffer.from(JSON.stringify({
+        type: "module",
+        dependencies: {
+          cheerio: "^1.2.0",
+          turndown: "^7.2.4",
+          tsx: "^4.20.6",
+        },
+      }, null, 2)),
+    },
+    {
+      path: "/tmp/redesign-runner/src/cloud-runner.ts",
+      content: Buffer.from(await readFile(join(process.cwd(), "src", "cloud-runner.ts"), "utf8")),
+    },
+    {
+      path: "/tmp/redesign-runner/src/research.ts",
+      content: Buffer.from(await readFile(join(process.cwd(), "src", "research.ts"), "utf8")),
+    },
+  ]);
+}
 
-    const command = await sandbox.runCommand(opencodeCommand(
-      ["run", "continue", "--continue", "--auto", "--dir", WORKDIR, "--model", opencodeModel],
-      relay,
-      "continue",
-      {
-        ...(aiGatewayKey ? { AI_GATEWAY_API_KEY: aiGatewayKey.key } : {}),
-        GITHUB_TOKEN: process.env.GITHUB_TOKEN ?? "",
-        GIT_USERNAME: "x-access-token",
-        GIT_PASSWORD: process.env.GITHUB_TOKEN ?? "",
-        GH_TOKEN: process.env.GITHUB_TOKEN ?? "",
-        VERCEL_TOKEN: process.env.VERCEL_TOKEN ?? "",
-        VERCEL_TEAM_ID: process.env.VERCEL_TEAM_ID ?? "",
-        OPENCODE_DISABLE_AUTOUPDATE: "true",
-        OPENCODE_DISABLE_MODELS_FETCH: "true",
+async function startTmuxRunner(sandbox: Sandbox, env: Record<string, string>) {
+  await must(await sandbox.runCommand({
+    cmd: "bash",
+    args: ["-lc", [
+      "set -euo pipefail",
+      "command -v tmux >/dev/null || sudo dnf install -y tmux",
+      `tmux kill-session -t ${TMUX_SESSION} 2>/dev/null || true`,
+      `tmux new-session -d -s ${TMUX_SESSION} 'cd /tmp/redesign-runner && npm install && npx tsx src/cloud-runner.ts; status=$?; echo; echo "redesign runner exited with status $status"; exec bash -l'`,
+      `tmux set-option -t ${TMUX_SESSION} status off`,
+    ].join("\n")],
+    env,
+  }), "tmux start");
+}
+
+function sandboxExecArgs(sandboxName: string) {
+  const scoped = ["--yes", `sandbox@${SANDBOX_CLI_VERSION}`, "exec"];
+  const teamId = process.env.VERCEL_TEAM_ID;
+  if (teamId) scoped.push("--scope", teamId);
+  scoped.push(
+    "--interactive",
+    "--tty",
+    "--workdir",
+    WORKDIR,
+    sandboxName,
+    "bash",
+    "-lc",
+    `tmux attach -t ${TMUX_SESSION}`,
+  );
+  return scoped;
+}
+
+export async function attachToSandbox(sandboxName: string) {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("npx", sandboxExecArgs(sandboxName), {
+      stdio: "inherit",
+      env: {
+        ...process.env,
+        VERCEL_AUTH_TOKEN: process.env.VERCEL_AUTH_TOKEN ?? process.env.VERCEL_TOKEN,
       },
-    ));
-    result.command = command.cmdId;
-
-    await writeRunMetrics(metricsPath, {
-      ...result,
-      previousMetricsPath,
-      previousCommand: previous.command,
-      aiGatewayKeyId,
-      aiGatewayKeyName,
-      startedAt: new Date(startMs).toISOString(),
-      status: "running",
     });
-
-    console.log(JSON.stringify(result, null, 2));
-
-    const { output, finished } = await streamUntilFinished(command, startMs, relay);
-    const endMs = Date.now();
-    const usage = (await estimateOpenCodeUsage(sandbox, [model]))?.[0];
-    const pricing = usage ? await modelPricing(model) : undefined;
-    const terminalMetrics = {
-      ...result,
-      previousMetricsPath,
-      previousCommand: previous.command,
-      aiGatewayKeyId,
-      aiGatewayKeyName,
-      startedAt: new Date(startMs).toISOString(),
-      endedAt: new Date(endMs).toISOString(),
-      wallTimeSeconds: Math.round((endMs - startMs) / 1000),
-      status: finished.exitCode === 0 ? "succeeded" : "failed",
-      exitCode: finished.exitCode,
-      outputTail: finished.exitCode === 0 ? undefined : outputTail(output),
-      estimatedUsage: usage,
-      estimatedPricing: pricing,
-      aiGatewayKeyDeletedAt: finished.exitCode === 0 && aiGatewayKey ? new Date().toISOString() : previous.aiGatewayKeyDeletedAt,
-    };
-
-    if (finished.exitCode === 0) {
-      const redesignUrl = await aliasRedesignUrl(extractRedesignUrl(output), previous.expectedRedesignUrl, previous.slug);
-      await writeRunMetrics(metricsPath, { ...terminalMetrics, redesignUrl });
-      console.log(`\nOriginal URL: ${previous.originalUrl}`);
-      console.log(`Redesign URL: ${redesignUrl}`);
-      console.log(`GitHub repo: ${previous.repoUrl}`);
-      console.log(`Slug: ${previous.slug}`);
-    } else {
-      await writeRunMetrics(metricsPath, terminalMetrics);
-      process.exitCode = finished.exitCode ?? 1;
-      console.error(`\nContinue failed with exit code ${finished.exitCode}. Sandbox left running for inspection: ${previous.sandbox}`);
-      console.error(outputTail(output));
-    }
-
-    if (usage) {
-      console.log(`Tokens: input ${usage.inputTokens.toLocaleString("en-US")}, output ${usage.outputTokens.toLocaleString("en-US")}, cache read ${usage.cachedInputTokens.toLocaleString("en-US")}, cache write ${usage.cacheCreationInputTokens.toLocaleString("en-US")}`);
-      console.log(`OpenCode sessions: ${usage.requestCount}`);
-      console.log(`Estimated total: ${money(usage.totalCost)}`);
-    } else {
-      console.log("Estimated usage: unavailable from OpenCode session data");
-    }
-    if (finished.exitCode === 0 && aiGatewayKey) await deleteAiGatewayKey(aiGatewayKey.id);
-    console.log(`AI Gateway budget: $${budget}`);
-    console.log(`Metrics: ${metricsPath}`);
-    return result;
-  } catch (error) {
-    const endMs = Date.now();
-    await writeRunMetrics(metricsPath, {
-      ...result,
-      previousMetricsPath,
-      previousCommand: previous.command,
-      aiGatewayKeyId,
-      aiGatewayKeyName,
-      startedAt: new Date(startMs).toISOString(),
-      endedAt: new Date(endMs).toISOString(),
-      wallTimeSeconds: Math.round((endMs - startMs) / 1000),
-      status: "failed",
-      error: error instanceof Error ? error.message : String(error),
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`attach failed with exit code ${code}`));
     });
-    throw error;
-  }
+  });
 }
 
 export async function runRedesign(options: RedesignOptions): Promise<RedesignResult> {
@@ -1004,216 +295,61 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
   const researchModel = DEFAULT_RESEARCH_MODEL;
   const draftModel = DEFAULT_DRAFT_MODEL;
   const implementationModel = DEFAULT_IMPLEMENTATION_MODEL;
-  const baseDomain = process.env.REDESIGN_BASE_DOMAIN ?? DEFAULT_BASE_DOMAIN;
-  const expectedRedesignUrl = `https://${slug}.${baseDomain}`;
-  const relay = logRelayFromEnv(slug);
+  const expectedRedesignUrl = `https://${slug}.${process.env.REDESIGN_BASE_DOMAIN ?? DEFAULT_BASE_DOMAIN}`;
   const githubToken = process.env.GITHUB_TOKEN;
-  const vercelToken = process.env.VERCEL_TOKEN ?? "";
-  const startMs = Date.now();
-  const metricsPath = join(process.cwd(), "runs", `${new Date(startMs).toISOString().replace(/[:.]/g, "-")}-${slug}.json`);
+  const startedAt = new Date().toISOString();
 
   if (!githubToken) throw new Error("Missing GITHUB_TOKEN");
 
+  const repo = await createGithubRepo(slug);
   const aiGatewayKey = await createAiGatewayKey(slug);
   let sandbox: Sandbox | undefined;
   let runnerStarted = false;
 
-  const result: RedesignResult = {
-    sandbox: "",
-    command: "",
-    slug,
-    originalUrl,
-    repoUrl: "",
-    expectedRedesignUrl,
-    model: `${researchModel} + ${draftModel} + ${implementationModel}`,
-    aiGatewayBudget: aiGatewayKey.budget,
-    metricsPath,
-    logRelayRunId: relay?.runId,
-  };
-
   try {
-    const repo = await createGithubRepo(slug);
-    result.repoUrl = repo.htmlUrl;
     sandbox = await Sandbox.create({
       name: makeSandboxName(slug),
       runtime: "node24",
       source: { type: "git", url: repo.cloneUrl, username: "x-access-token", password: githubToken, depth: 1 },
       timeout: (options.timeoutMinutes ?? 90) * 60 * 1000,
       resources: { vcpus: 2 },
-      env: {
-        AI_GATEWAY_API_KEY: aiGatewayKey.key,
-        GITHUB_TOKEN: githubToken,
-        GIT_USERNAME: "x-access-token",
-        GIT_PASSWORD: githubToken,
-        GH_TOKEN: githubToken,
-        VERCEL_TOKEN: vercelToken,
-        VERCEL_TEAM_ID: process.env.VERCEL_TEAM_ID ?? "",
-        OPENCODE_DISABLE_AUTOUPDATE: "true",
-        OPENCODE_DISABLE_MODELS_FETCH: "true",
-        ...(relay ? {
-          LOG_RELAY_URL: relay.url,
-          LOG_RELAY_TOKEN: relay.token,
-          LOG_RELAY_RUN_ID: relay.runId,
-        } : {}),
-      },
       tags: { app: "redesign-hosted-2", slug },
     });
-    result.sandbox = sandbox.name;
 
-    await must(await sandbox.runCommand("mkdir", ["-p", "/tmp/redesign-runner/src", "/tmp/redesign-runner/skills/nextjs-site-building"]), "runner mkdir");
-    await sandbox.writeFiles([
-      {
-        path: "/tmp/redesign-runner/package.json",
-        content: Buffer.from(JSON.stringify({
-          type: "module",
-          dependencies: {
-            cheerio: "^1.2.0",
-            turndown: "^7.2.4",
-            tsx: "^4.20.6",
-          },
-        }, null, 2)),
-      },
-      {
-        path: "/tmp/redesign-runner/src/cloud-runner.ts",
-        content: Buffer.from(await readFile(join(process.cwd(), "src", "cloud-runner.ts"), "utf8")),
-      },
-      {
-        path: "/tmp/redesign-runner/src/research.ts",
-        content: Buffer.from(await readFile(join(process.cwd(), "src", "research.ts"), "utf8")),
-      },
-      {
-        path: "/tmp/redesign-runner/skills/nextjs-site-building/SKILL.md",
-        content: Buffer.from(await readFile(join(process.cwd(), "skills", "nextjs-site-building", "SKILL.md"), "utf8")),
-      },
-      ...(relay ? [{
-        path: LOG_RELAY_WRAPPER_PATH,
-        content: await localLogRelayWrapper(),
-      }] : []),
-    ]);
-
-    await writeRunMetrics(metricsPath, {
-      ...result,
-      aiGatewayKeyId: aiGatewayKey.id,
-      aiGatewayKeyName: aiGatewayKey.name,
-      startedAt: new Date(startMs).toISOString(),
-      status: "running",
-      phase: "cloud-runner",
-      researchModel,
-      draftModel,
-      implementationModel,
+    const env = runnerEnv({
+      aiGatewayKey,
+      githubToken,
+      originalUrl,
+      slug,
+      repoUrl: repo.htmlUrl,
+      expectedRedesignUrl,
+      startedAt,
+      sandboxName: sandbox.name,
     });
+    await uploadRunner(sandbox);
+    await startTmuxRunner(sandbox, env);
+    runnerStarted = true;
+
+    const result = {
+      sandbox: sandbox.name,
+      tmuxSession: TMUX_SESSION,
+      slug,
+      originalUrl,
+      repoUrl: repo.htmlUrl,
+      expectedRedesignUrl,
+      model: `${researchModel} + ${draftModel} + ${implementationModel}`,
+      aiGatewayBudget: aiGatewayKey.budget,
+    };
 
     console.log(JSON.stringify(result, null, 2));
-
-    const command = await sandbox.runCommand({
-      cmd: "bash",
-      args: ["-lc", "npm install && npx tsx src/cloud-runner.ts"],
-      cwd: "/tmp/redesign-runner",
-      detached: true,
-      env: {
-        AI_GATEWAY_API_KEY: aiGatewayKey.key,
-        GITHUB_TOKEN: githubToken,
-        GIT_USERNAME: "x-access-token",
-        GIT_PASSWORD: githubToken,
-        GH_TOKEN: githubToken,
-        VERCEL_TOKEN: vercelToken,
-        VERCEL_TEAM_ID: process.env.VERCEL_TEAM_ID ?? "",
-        OPENCODE_DISABLE_AUTOUPDATE: "true",
-        OPENCODE_DISABLE_MODELS_FETCH: "true",
-        ...(relay ? {
-          LOG_RELAY_URL: relay.url,
-          LOG_RELAY_TOKEN: relay.token,
-          LOG_RELAY_RUN_ID: relay.runId,
-        } : {}),
-        REDESIGN_SITE: originalUrl,
-        REDESIGN_SLUG: slug,
-        REDESIGN_REPO_URL: repo.htmlUrl,
-        REDESIGN_EXPECTED_URL: expectedRedesignUrl,
-        REDESIGN_STARTED_AT: new Date(startMs).toISOString(),
-        REDESIGN_SANDBOX: sandbox.name,
-        AI_GATEWAY_KEY_ID: aiGatewayKey.id,
-        AI_GATEWAY_KEY_NAME: aiGatewayKey.name,
-        AI_GATEWAY_BUDGET: String(aiGatewayKey.budget),
-      },
-    });
-    result.command = command.cmdId;
-    runnerStarted = true;
-    await writeRunMetrics(metricsPath, {
-      ...result,
-      aiGatewayKeyId: aiGatewayKey.id,
-      aiGatewayKeyName: aiGatewayKey.name,
-      startedAt: new Date(startMs).toISOString(),
-      status: "running",
-      phase: "cloud-runner",
-      researchModel,
-      draftModel,
-      implementationModel,
-      runnerCommand: command.cmdId,
-    });
-
-    const { output, finished } = await streamUntilFinished(command, startMs);
-    const endMs = Date.now();
-    const wallTimeSeconds = Math.round((endMs - startMs) / 1000);
-    const redesignUrl = extractRedesignUrl(output);
-
-    await writeRunMetrics(metricsPath, {
-      ...result,
-      aiGatewayKeyId: aiGatewayKey.id,
-      aiGatewayKeyName: aiGatewayKey.name,
-      startedAt: new Date(startMs).toISOString(),
-      endedAt: new Date(endMs).toISOString(),
-      wallTimeSeconds,
-      status: finished.exitCode === 0 ? "succeeded" : "failed",
-      exitCode: finished.exitCode,
-      redesignUrl,
-      researchModel,
-      draftModel,
-      implementationModel,
-      runnerCommand: command.cmdId,
-      outputTail: finished.exitCode === 0 ? undefined : outputTail(output),
-    });
-
-    if (finished.exitCode !== 0) {
-      console.error(`Sandbox left running for inspection: ${sandbox.name}`);
-      throw new Error(`Cloud runner failed with exit code ${finished.exitCode}`);
-    }
-
-    console.log(`\nOriginal URL: ${originalUrl}`);
-    console.log(`Redesign URL: ${redesignUrl ?? expectedRedesignUrl}`);
-    console.log(`GitHub repo: ${repo.htmlUrl}`);
-    console.log(`Slug: ${slug}`);
-    console.log(`Wall time: ${wallTimeSeconds}s`);
-    console.log(`AI Gateway budget: $${aiGatewayKey.budget}`);
-    console.log(`Metrics: ${metricsPath}`);
-
-    if (!options.keepSandbox) await sandbox.delete();
+    console.log(`\nReattach later: npm run attach -- --sandbox ${sandbox.name}\n`);
+    await attachToSandbox(sandbox.name);
     return result;
   } catch (error) {
-    const endMs = Date.now();
-    await writeRunMetrics(metricsPath, {
-      ...result,
-      aiGatewayKeyId: aiGatewayKey.id,
-      aiGatewayKeyName: aiGatewayKey.name,
-      startedAt: new Date(startMs).toISOString(),
-      endedAt: new Date(endMs).toISOString(),
-      wallTimeSeconds: Math.round((endMs - startMs) / 1000),
-      status: "failed",
-      phase: "cloud-runner",
-      researchModel,
-      draftModel,
-      implementationModel,
-      error: error instanceof Error ? error.message : String(error),
-    });
     if (!runnerStarted) await deleteAiGatewayKey(aiGatewayKey.id);
     if (sandbox) console.error(`Sandbox left running for inspection: ${sandbox.name}`);
     throw error;
   }
-}
-
-export async function commandOutput(sandboxName: string, commandId: string) {
-  const sandbox = await Sandbox.get({ name: sandboxName });
-  const command = await sandbox.getCommand(commandId);
-  return command.output("both");
 }
 
 export async function cleanupSandbox(sandboxName: string) {

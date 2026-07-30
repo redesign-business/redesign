@@ -1,80 +1,27 @@
 import assert from "node:assert/strict";
 import {
-  aliasHostForRedesignUrl,
-  appendWithoutReplay,
-  buildDraftPrompt,
-  buildRepairPrompt,
-  buildResearchPrompt,
-  extractRedesignUrl,
-  gatewayModelFromInput,
-  isBudgetFailureOutput,
+  makeSandboxName,
   normalizeHttpUrl,
   normalizeSlug,
-  opencodeModelForGatewayModel,
   parseArgs,
+  readRequired,
   slugFromUrl,
 } from "./redesign.js";
 import { normalizeSameDomainUrl, parseSrcset } from "./research.js";
 
-const parsed = parseArgs(["https://acme.test", "--slug", "Acme Plumbing", "--keep-sandbox"]);
+const parsed = parseArgs(["https://acme.test", "--slug", "Acme Plumbing"]);
 assert.deepEqual(parsed.positional, ["https://acme.test"]);
 assert.equal(parsed.args.get("slug"), "Acme Plumbing");
-assert.equal(parsed.args.get("keep-sandbox"), "true");
 assert.throws(() => parseArgs(["--slug"]), /Missing value/);
+assert.equal(readRequired(parsed.args, "slug"), "Acme Plumbing");
+assert.throws(() => readRequired(parsed.args, "sandbox"), /Missing --sandbox/);
 
 assert.equal(normalizeHttpUrl("acme.test"), "https://acme.test/");
 assert.equal(slugFromUrl("https://www.Acme-Plumbing.com/services"), "acme-plumbing");
 assert.equal(slugFromUrl("https://jobs.Acme-Plumbing.com/services"), "jobs-acme-plumbing");
 assert.equal(normalizeSlug("Acme Plumbing"), "acme-plumbing");
 assert.throws(() => normalizeSlug("-"), /Invalid slug/);
-assert.equal(gatewayModelFromInput("deepseek/deepseek-v4-pro"), "deepseek/deepseek-v4-pro");
-assert.equal(gatewayModelFromInput("vercel/deepseek/deepseek-v4-pro"), "deepseek/deepseek-v4-pro");
-assert.equal(opencodeModelForGatewayModel("deepseek/deepseek-v4-pro"), "vercel/deepseek/deepseek-v4-pro");
-assert.equal(isBudgetFailureOutput("AI Gateway quota limit exceeded"), true);
-assert.equal(isBudgetFailureOutput("process exited before running build"), false);
-
-const researchPrompt = buildResearchPrompt({
-  site: "https://acme.test/",
-  slug: "acme",
-  repoUrl: "https://github.com/redesign-business/acme",
-});
-assert.match(researchPrompt, /raw\.md already contains/);
-assert.match(researchPrompt, /public\/images\/manifest\.json/);
-assert.match(researchPrompt, /Commit and push proof\.md/);
-assert.doesNotMatch(researchPrompt, /Build the site/);
-
-const draftPrompt = buildDraftPrompt({
-  site: "https://acme.test/",
-  slug: "acme",
-  repoUrl: "https://github.com/redesign-business/acme",
-});
-assert.match(draftPrompt, /Build the first draft/);
-assert.match(draftPrompt, /\.opencode\/skills\/nextjs-site-building\/SKILL\.md/);
-assert.match(draftPrompt, /public\/images\/manifest\.json/);
-assert.match(draftPrompt, /Build the site in page\.tsx/);
-assert.match(draftPrompt, /Don't build, commit, or push/);
-
-const repairPrompt = buildRepairPrompt("Type error: nope");
-assert.match(repairPrompt, /Fix the exact production build error/);
-assert.match(repairPrompt, /Type error: nope/);
-assert.match(repairPrompt, /Do not commit, push, deploy/);
-assert.doesNotMatch(repairPrompt, /nextjs-site-building/);
-
-assert.equal(extractRedesignUrl("Original URL: https://old.test\nRedesign URL: https://new.test"), "https://new.test");
-assert.equal(extractRedesignUrl("nothing here"), undefined);
-
-assert.equal(
-  aliasHostForRedesignUrl("https://acme.vercel.app", "https://acme.redesign.business"),
-  "acme.redesign.business",
-);
-assert.equal(
-  aliasHostForRedesignUrl("https://acme.redesign.business", "https://acme.redesign.business"),
-  undefined,
-);
-
-assert.equal(appendWithoutReplay("hello world", "world again"), " again");
-assert.equal(appendWithoutReplay("hello world", "hello world"), "");
-assert.equal(appendWithoutReplay("hello world", "fresh"), "fresh");
+assert.match(makeSandboxName("acme"), /^redesign-acme-[a-f0-9]{8}$/);
 
 assert.equal(
   normalizeSameDomainUrl("/about#team", "https://acme.test/", "https://acme.test"),

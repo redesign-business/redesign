@@ -1,13 +1,11 @@
-import { cleanupSandbox, commandOutput, continueRedesign, parseArgs, readRequired, refreshUsage, runRedesign } from "./redesign.js";
+import { attachToSandbox, cleanupSandbox, parseArgs, readRequired, runRedesign } from "./redesign.js";
 
 const [cmd = "help", ...rest] = process.argv.slice(2);
 const usage = [
   "Usage:",
-  "  npm run redesign <url> [--slug <slug>] [--keep-sandbox]",
-  "  npm run continue -- --metrics <path>",
-  "  npm run logs -- --sandbox <sandbox> --command <command>",
+  "  npm run redesign -- <url> [--slug <slug>]",
+  "  npm run attach -- --sandbox <sandbox>",
   "  npm run stop -- --sandbox <sandbox>",
-  "  npm run usage -- --metrics <path>",
 ].join("\n");
 
 if (cmd === "help" || rest.includes("--help")) {
@@ -25,15 +23,12 @@ try {
     await runRedesign({
       site,
       slug: args.get("slug"),
-      keepSandbox: args.get("keep-sandbox") === "true",
       timeoutMinutes: args.has("timeout") ? Number(args.get("timeout")) : undefined,
     });
-  } else if (cmd === "logs") {
-    console.log(await commandOutput(readRequired(args, "sandbox"), readRequired(args, "command")));
-  } else if (cmd === "continue") {
-    await continueRedesign(readRequired(args, "metrics"));
-  } else if (cmd === "usage") {
-    await refreshUsage(readRequired(args, "metrics"));
+  } else if (cmd === "attach") {
+    const sandbox = args.get("sandbox") ?? positional[0];
+    if (!sandbox) throw new Error("Missing --sandbox");
+    await attachToSandbox(sandbox);
   } else if (cmd === "stop") {
     await cleanupSandbox(readRequired(args, "sandbox"));
     console.log("Sandbox deleted.");
