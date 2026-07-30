@@ -25,6 +25,7 @@ export type RedesignResult = {
   model: string;
   aiGatewayBudget: number;
   metricsPath: string;
+  logRelayRunId?: string;
 };
 
 type AiGatewayUsage = {
@@ -57,6 +58,7 @@ type RunMetrics = RedesignResult & {
 
 const OPENCODE_BIN = "/home/vercel-sandbox/.opencode/node_modules/.bin/opencode";
 const WORKDIR = "/vercel/sandbox";
+const LOG_RELAY_WRAPPER_PATH = "/tmp/redesign-log-relay-wrapper.mjs";
 const DEFAULT_RESEARCH_MODEL = "deepseek/deepseek-v4-pro";
 const DEFAULT_DRAFT_MODEL = "openai/gpt-5.6-sol";
 const DEFAULT_IMPLEMENTATION_MODEL = "deepseek/deepseek-v4-pro";
@@ -64,10 +66,102 @@ const DEFAULT_GITHUB_OWNER = "redesign-business";
 const DEFAULT_BASE_DOMAIN = "redesign.business";
 const DEFAULT_AI_GATEWAY_BUDGET = 1;
 const LOG_STREAM_IDLE_MS = 10_000;
+const LOG_RELAY_RECONNECT_MS = 500;
 
 const skillFiles = [
   "nextjs-site-building",
 ] as const;
+
+const LOG_RELAY_WRAPPER = String.raw`
+import { spawn } from "node:child_process";
+
+const [cmd, ...args] = process.argv.slice(2);
+if (!cmd) throw new Error("Missing command");
+
+const relayUrl = process.env.LOG_RELAY_URL?.replace(/\/+$/, "");
+const token = process.env.LOG_RELAY_TOKEN;
+const runId = process.env.LOG_RELAY_RUN_ID;
+const phase = process.env.LOG_RELAY_PHASE;
+const url = relayUrl && token && runId
+  ? relayUrl + "/runs/" + encodeURIComponent(runId) + "?role=writer&token=" + encodeURIComponent(token)
+  : undefined;
+
+let ws;
+let connecting = false;
+let closed = false;
+const queue = [];
+
+function connect() {
+  if (!url || closed || connecting || ws?.readyState === WebSocket.OPEN) return;
+  connecting = true;
+  const next = new WebSocket(url);
+  const timeout = setTimeout(() => {
+    try { next.close(); } catch {}
+  }, 5_000);
+
+  next.addEventListener("open", () => {
+    clearTimeout(timeout);
+    connecting = false;
+    ws = next;
+    while (queue.length && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(queue.shift()));
+    }
+  }, { once: true });
+
+  next.addEventListener("close", () => {
+    clearTimeout(timeout);
+    connecting = false;
+    if (ws === next) ws = undefined;
+    if (!closed) setTimeout(connect, 500);
+  });
+
+  next.addEventListener("error", () => {
+    clearTimeout(timeout);
+    connecting = false;
+  });
+}
+
+function send(stream, data) {
+  if (!url) return;
+  const message = { phase, stream, data };
+  if (ws?.readyState === WebSocket.OPEN) {
+    try {
+      ws.send(JSON.stringify(message));
+      return;
+    } catch {}
+  }
+  queue.push(message);
+  if (queue.length > 1000) queue.shift();
+  connect();
+}
+
+connect();
+const child = spawn(cmd, args, { env: process.env });
+child.stdout.on("data", (chunk) => {
+  const data = chunk.toString();
+  process.stdout.write(data);
+  send("stdout", data);
+});
+child.stderr.on("data", (chunk) => {
+  const data = chunk.toString();
+  process.stderr.write(data);
+  send("stderr", data);
+});
+child.on("error", (error) => {
+  process.stderr.write(error.message + "\n");
+  process.exitCode = 1;
+});
+child.on("close", async (code) => {
+  const deadline = Date.now() + 2_000;
+  while (queue.length && Date.now() < deadline) {
+    connect();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  closed = true;
+  try { ws?.close(); } catch {}
+  process.exit(code ?? 1);
+});
+`;
 
 export function parseArgs(argv: string[]) {
   const args = new Map<string, string>();
@@ -244,6 +338,139 @@ export function appendWithoutReplay(output: string, data: string) {
   return data.slice(overlap);
 }
 
+type LogRelay = {
+  url: string;
+  token: string;
+  runId: string;
+  afterSeq: number;
+};
+
+type RelayMessage = {
+  seq?: number;
+  stream?: "stdout" | "stderr" | "status";
+  data?: string;
+};
+
+type WebSocketLike = {
+  addEventListener: (
+    event: "open" | "message" | "error" | "close",
+    listener: (event: { data?: string; error?: unknown }) => void,
+    options?: { once?: boolean },
+  ) => void;
+  close: () => void;
+};
+
+const WebSocketCtor = globalThis.WebSocket as unknown as {
+  new (url: string): WebSocketLike;
+};
+
+function logRelayFromEnv(slug: string): LogRelay | undefined {
+  const url = process.env.LOG_RELAY_URL;
+  const token = process.env.LOG_RELAY_TOKEN;
+  if (!url || !token) return undefined;
+
+  return {
+    url: url.replace(/\/+$/, ""),
+    token,
+    runId: `${slug}-${randomUUID().slice(0, 8)}`,
+    afterSeq: 0,
+  };
+}
+
+function logRelaySocketUrl(relay: LogRelay, role: "reader" | "writer", phase?: string) {
+  const params = new URLSearchParams({
+    role,
+    token: relay.token,
+  });
+  if (role === "reader") params.set("after", String(relay.afterSeq));
+  if (phase) params.set("phase", phase);
+  return `${relay.url}/runs/${encodeURIComponent(relay.runId)}?${params}`;
+}
+
+function logRelayCommandEnv(relay: LogRelay, phase: string) {
+  return {
+    LOG_RELAY_URL: relay.url,
+    LOG_RELAY_TOKEN: relay.token,
+    LOG_RELAY_RUN_ID: relay.runId,
+    LOG_RELAY_PHASE: phase,
+  };
+}
+
+function opencodeCommand(args: string[], relay: LogRelay | undefined, phase: string, env?: Record<string, string>) {
+  const commandEnv = {
+    ...env,
+    ...(relay ? logRelayCommandEnv(relay, phase) : {}),
+  };
+
+  return {
+    cmd: relay ? "node" : OPENCODE_BIN,
+    args: relay ? [LOG_RELAY_WRAPPER_PATH, OPENCODE_BIN, ...args] : args,
+    detached: true,
+    env: Object.keys(commandEnv).length ? commandEnv : undefined,
+  };
+}
+
+function openRelayReader(relay: LogRelay) {
+  return new Promise<WebSocketLike>((resolve, reject) => {
+    const ws = new WebSocketCtor(logRelaySocketUrl(relay, "reader"));
+    const timer = setTimeout(() => {
+      ws.close();
+      reject(new Error("Log relay connect timeout"));
+    }, 5_000);
+
+    ws.addEventListener("open", () => {
+      clearTimeout(timer);
+      resolve(ws);
+    }, { once: true });
+    ws.addEventListener("error", (event) => {
+      clearTimeout(timer);
+      reject(event.error instanceof Error ? event.error : new Error("Log relay connect failed"));
+    }, { once: true });
+  });
+}
+
+function parseRelayMessage(data: string | undefined): RelayMessage | undefined {
+  if (!data) return undefined;
+  try {
+    const parsed = JSON.parse(data) as RelayMessage;
+    return typeof parsed.data === "string" ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function streamFromRelay(relay: LogRelay, finished: () => boolean, write: (data: string, stream?: string) => void) {
+  while (!finished()) {
+    let sawClose = false;
+    try {
+      const ws = await openRelayReader(relay);
+      ws.addEventListener("message", (event) => {
+        const message = parseRelayMessage(event.data);
+        if (!message) return;
+        if (typeof message.seq === "number") relay.afterSeq = Math.max(relay.afterSeq, message.seq);
+        write(message.data ?? "", message.stream);
+      });
+      await new Promise<void>((resolve) => {
+        ws.addEventListener("close", () => {
+          sawClose = true;
+          resolve();
+        }, { once: true });
+        ws.addEventListener("error", () => resolve(), { once: true });
+        const interval = setInterval(() => {
+          if (finished()) {
+            clearInterval(interval);
+            ws.close();
+            resolve();
+          }
+        }, 250);
+      });
+    } catch {
+      // The command still writes to Vercel logs. Reconnect quickly and fall back later if needed.
+    }
+    if (!finished() || sawClose) await sleep(LOG_RELAY_RECONNECT_MS);
+  }
+}
+
 async function waitForCommand(command: Command) {
   while (true) {
     try {
@@ -255,13 +482,44 @@ async function waitForCommand(command: Command) {
   }
 }
 
-async function streamUntilFinished(command: Command, _startedAt: number) {
+async function streamUntilFinished(command: Command, _startedAt: number, relay?: LogRelay) {
   const logsAbort = new AbortController();
   let output = "";
   let finished = false;
   const waitPromise = waitForCommand(command).finally(() => {
     finished = true;
   });
+
+  const write = (data: string, streamName?: string) => {
+    const fresh = appendWithoutReplay(output, data);
+    if (!fresh) return;
+    output += fresh;
+    const stream = streamName === "stderr" ? process.stderr : process.stdout;
+    stream.write(fresh);
+  };
+
+  if (relay) {
+    let result: CommandFinished;
+    try {
+      await Promise.race([
+        streamFromRelay(relay, () => finished, write),
+        waitPromise,
+      ]);
+      result = await waitPromise;
+    } finally {
+      logsAbort.abort();
+    }
+
+    try {
+      const finalOutput = await command.output("both");
+      if (!output) write(finalOutput);
+      else if (finalOutput.startsWith(output)) write(finalOutput.slice(output.length));
+    } catch {
+      // Relay already carried the live output. Command output is only a fallback/catch-up.
+    }
+
+    return { output, finished: result };
+  }
 
   const logsPromise = (async () => {
     while (!finished && !logsAbort.signal.aborted) {
@@ -282,11 +540,7 @@ async function streamUntilFinished(command: Command, _startedAt: number) {
       try {
         for await (const log of command.logs({ signal: streamAbort.signal })) {
           resetIdleTimer();
-          const fresh = appendWithoutReplay(output, log.data);
-          if (!fresh) continue;
-          output += fresh;
-          const stream = log.stream === "stderr" ? process.stderr : process.stdout;
-          stream.write(fresh);
+          write(log.data, log.stream);
         }
       } catch (error) {
         if (!logsAbort.signal.aborted && !finished) {
@@ -686,6 +940,7 @@ export async function continueRedesign(previousMetricsPath: string): Promise<Red
   const model = modelForContinue(previous);
   const opencodeModel = opencodeModelForGatewayModel(model);
   const budget = Number(previous.aiGatewayBudget || DEFAULT_AI_GATEWAY_BUDGET);
+  const relay = logRelayFromEnv(previous.slug);
   const startMs = Date.now();
   const metricsPath = join(process.cwd(), "runs", `${new Date(startMs).toISOString().replace(/[:.]/g, "-")}-${previous.slug}-continue.json`);
   const aiGatewayKey = previous.aiGatewayKeyDeletedAt ? await createAiGatewayKey(`${previous.slug}-continue`, budget) : undefined;
@@ -702,17 +957,21 @@ export async function continueRedesign(previousMetricsPath: string): Promise<Red
     model,
     aiGatewayBudget: budget,
     metricsPath,
+    logRelayRunId: relay?.runId,
   };
 
   try {
     const sandbox = await Sandbox.get({ name: previous.sandbox });
     await sandbox.runCommand("bash", ["-lc", "pkill -f '[o]pencode' || true"]);
+    if (relay) {
+      await sandbox.writeFiles([{ path: LOG_RELAY_WRAPPER_PATH, content: Buffer.from(LOG_RELAY_WRAPPER) }]);
+    }
 
-    const command = await sandbox.runCommand({
-      cmd: OPENCODE_BIN,
-      args: ["run", "continue", "--continue", "--auto", "--dir", WORKDIR, "--model", opencodeModel],
-      detached: true,
-      env: {
+    const command = await sandbox.runCommand(opencodeCommand(
+      ["run", "continue", "--continue", "--auto", "--dir", WORKDIR, "--model", opencodeModel],
+      relay,
+      "continue",
+      {
         ...(aiGatewayKey ? { AI_GATEWAY_API_KEY: aiGatewayKey.key } : {}),
         GITHUB_TOKEN: process.env.GITHUB_TOKEN ?? "",
         GIT_USERNAME: "x-access-token",
@@ -723,7 +982,7 @@ export async function continueRedesign(previousMetricsPath: string): Promise<Red
         OPENCODE_DISABLE_AUTOUPDATE: "true",
         OPENCODE_DISABLE_MODELS_FETCH: "true",
       },
-    });
+    ));
     result.command = command.cmdId;
 
     await writeRunMetrics(metricsPath, {
@@ -738,7 +997,7 @@ export async function continueRedesign(previousMetricsPath: string): Promise<Red
 
     console.log(JSON.stringify(result, null, 2));
 
-    const { output, finished } = await streamUntilFinished(command, startMs);
+    const { output, finished } = await streamUntilFinished(command, startMs, relay);
     const endMs = Date.now();
     const usage = (await estimateOpenCodeUsage(sandbox, [model]))?.[0];
     const pricing = usage ? await modelPricing(model) : undefined;
@@ -811,6 +1070,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
   const usageModels = [...new Set([researchModel, draftModel, implementationModel])];
   const baseDomain = process.env.REDESIGN_BASE_DOMAIN ?? DEFAULT_BASE_DOMAIN;
   const expectedRedesignUrl = `https://${slug}.${baseDomain}`;
+  const relay = logRelayFromEnv(slug);
   const githubToken = process.env.GITHUB_TOKEN;
   const vercelToken = process.env.VERCEL_TOKEN ?? "";
   const startMs = Date.now();
@@ -831,6 +1091,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
     model: `${researchModel} + ${draftModel} + ${implementationModel}`,
     aiGatewayBudget: aiGatewayKey.budget,
     metricsPath,
+    logRelayRunId: relay?.runId,
   };
 
   try {
@@ -852,6 +1113,11 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
         VERCEL_TEAM_ID: process.env.VERCEL_TEAM_ID ?? "",
         OPENCODE_DISABLE_AUTOUPDATE: "true",
         OPENCODE_DISABLE_MODELS_FETCH: "true",
+        ...(relay ? {
+          LOG_RELAY_URL: relay.url,
+          LOG_RELAY_TOKEN: relay.token,
+          LOG_RELAY_RUN_ID: relay.runId,
+        } : {}),
       },
       tags: { app: "redesign-hosted-2", slug },
     });
@@ -893,6 +1159,10 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
           },
         }, null, 2)),
       },
+      ...(relay ? [{
+        path: LOG_RELAY_WRAPPER_PATH,
+        content: Buffer.from(LOG_RELAY_WRAPPER),
+      }] : []),
       {
         path: "/tmp/research-prompt.md",
         content: Buffer.from(buildResearchPrompt({ site: originalUrl, slug, repoUrl: repo.htmlUrl })),
@@ -921,13 +1191,13 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
 
     console.log(JSON.stringify(result, null, 2));
 
-    const research = await sandbox.runCommand({
-      cmd: OPENCODE_BIN,
-      args: ["run", "Follow the attached redesign prompt.", "--auto", "--dir", WORKDIR, "--title", `Research ${slug}`, "--model", opencodeModelForGatewayModel(researchModel), "--file", "/tmp/research-prompt.md"],
-      detached: true,
-    });
+    const research = await sandbox.runCommand(opencodeCommand(
+      ["run", "Follow the attached redesign prompt.", "--auto", "--dir", WORKDIR, "--title", `Research ${slug}`, "--model", opencodeModelForGatewayModel(researchModel), "--file", "/tmp/research-prompt.md"],
+      relay,
+      "research",
+    ));
     result.command = research.cmdId;
-    const researchRun = await streamUntilFinished(research, startMs);
+    const researchRun = await streamUntilFinished(research, startMs, relay);
     if (researchRun.finished.exitCode !== 0) {
       throw new Error(`Research phase failed with exit code ${researchRun.finished.exitCode}\n${outputTail(researchRun.output)}`);
     }
@@ -945,13 +1215,13 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       researchCommand: research.cmdId,
     });
 
-    const draft = await sandbox.runCommand({
-      cmd: OPENCODE_BIN,
-      args: ["run", "git pull --ff-only && follow the attached first-draft prompt.", "--auto", "--dir", WORKDIR, "--title", `Draft ${slug}`, "--model", opencodeModelForGatewayModel(draftModel), "--file", "/tmp/draft-prompt.md"],
-      detached: true,
-    });
+    const draft = await sandbox.runCommand(opencodeCommand(
+      ["run", "git pull --ff-only && follow the attached first-draft prompt.", "--auto", "--dir", WORKDIR, "--title", `Draft ${slug}`, "--model", opencodeModelForGatewayModel(draftModel), "--file", "/tmp/draft-prompt.md"],
+      relay,
+      "draft",
+    ));
     result.command = draft.cmdId;
-    const draftRun = await streamUntilFinished(draft, startMs);
+    const draftRun = await streamUntilFinished(draft, startMs, relay);
     if (draftRun.finished.exitCode !== 0) {
       throw new Error(`Draft phase failed with exit code ${draftRun.finished.exitCode}\n${outputTail(draftRun.output)}`);
     }
@@ -970,13 +1240,13 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       draftCommand: draft.cmdId,
     });
 
-    const build = await sandbox.runCommand({
-      cmd: OPENCODE_BIN,
-      args: ["run", "git pull --ff-only && follow the attached implementation prompt.", "--auto", "--dir", WORKDIR, "--title", `Implement ${slug}`, "--model", opencodeModelForGatewayModel(implementationModel), "--file", "/tmp/site-prompt.md"],
-      detached: true,
-    });
+    const build = await sandbox.runCommand(opencodeCommand(
+      ["run", "git pull --ff-only && follow the attached implementation prompt.", "--auto", "--dir", WORKDIR, "--title", `Implement ${slug}`, "--model", opencodeModelForGatewayModel(implementationModel), "--file", "/tmp/site-prompt.md"],
+      relay,
+      "implementation",
+    ));
     result.command = build.cmdId;
-    const buildRun = await streamUntilFinished(build, startMs);
+    const buildRun = await streamUntilFinished(build, startMs, relay);
     if (buildRun.finished.exitCode !== 0) {
       throw new Error(`Implementation phase failed with exit code ${buildRun.finished.exitCode}\n${outputTail(buildRun.output)}`);
     }

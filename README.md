@@ -55,3 +55,5 @@ Skipped: dashboard, queue, workflow, branch previews, automated tests. Add them 
 ## Log Relay
 
 `log-relay/` is a small Cloudflare Worker/Hono project for durable WebSocket log streaming. It keeps one Durable Object per redesign run id, accepts writer and reader sockets, and replays recent messages with `after=<seq>`.
+
+Set `LOG_RELAY_URL` and `LOG_RELAY_TOKEN` to make `npm run redesign` stream through the relay. Without them, the CLI uses Vercel Sandbox logs directly.
