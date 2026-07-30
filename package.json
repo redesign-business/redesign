@@ -9,7 +9,7 @@
     "logs": "tsx src/cli.ts logs",
     "usage": "tsx src/cli.ts usage",
     "stop": "tsx src/cli.ts stop",
-    "test": "tsx src/redesign.test.ts",
+    "test": "node --check src/log-relay-wrapper.mjs && tsx src/redesign.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
