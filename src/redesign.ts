@@ -136,7 +136,7 @@ function send(stream, data) {
 }
 
 connect();
-const child = spawn(cmd, args, { env: process.env });
+const child = spawn(cmd, args, { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
 child.stdout.on("data", (chunk) => {
   const data = chunk.toString();
   process.stdout.write(data);
