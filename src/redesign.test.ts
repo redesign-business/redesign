@@ -6,14 +6,12 @@ import {
   buildResearchPrompt,
   buildSitePrompt,
   extractRedesignUrl,
-  formatUsageTable,
   gatewayModelFromInput,
   normalizeHttpUrl,
   normalizeSlug,
   opencodeModelForGatewayModel,
   parseArgs,
   slugFromUrl,
-  usageCostRows,
 } from "./redesign.js";
 
 const parsed = parseArgs(["https://acme.test", "--slug", "Acme Plumbing", "--keep-sandbox"]);
@@ -21,9 +19,6 @@ assert.deepEqual(parsed.positional, ["https://acme.test"]);
 assert.equal(parsed.args.get("slug"), "Acme Plumbing");
 assert.equal(parsed.args.get("keep-sandbox"), "true");
 assert.throws(() => parseArgs(["--slug"]), /Missing value/);
-
-const parsedAgent = parseArgs(["https://acme.test", "--agent-id", "thread-123"]);
-assert.equal(parsedAgent.args.get("agent-id"), "thread-123");
 
 assert.equal(normalizeHttpUrl("acme.test"), "https://acme.test/");
 assert.equal(slugFromUrl("https://www.Acme-Plumbing.com/services"), "acme-plumbing");
@@ -41,7 +36,7 @@ const researchPrompt = buildResearchPrompt({
 });
 assert.match(researchPrompt, /1\) Scrape the URL for copy and images/);
 assert.match(researchPrompt, /2\) Make a proof\.md/);
-assert.match(researchPrompt, /Stop after step 2/);
+assert.match(researchPrompt, /raw\.md, proof\.md, and images\/ are pushed/);
 assert.doesNotMatch(researchPrompt, /Build the site/);
 
 const draftPrompt = buildDraftPrompt({
@@ -51,9 +46,8 @@ const draftPrompt = buildDraftPrompt({
 });
 assert.match(draftPrompt, /Build the first draft/);
 assert.match(draftPrompt, /\.opencode\/skills\/nextjs-site-building\/SKILL\.md/);
-assert.match(draftPrompt, /feat: build landing page/);
-assert.match(draftPrompt, /Do not run the refine-landing-page pass/);
-assert.match(draftPrompt, /Do not deploy/);
+assert.match(draftPrompt, /Build the site in page\.tsx/);
+assert.match(draftPrompt, /Don't build, commit, or push/);
 
 const sitePrompt = buildSitePrompt({
   site: "https://acme.test/",
@@ -61,10 +55,9 @@ const sitePrompt = buildSitePrompt({
   repoUrl: "https://github.com/redesign-business/acme",
   expectedRedesignUrl: "https://acme.redesign.business",
 });
-assert.match(sitePrompt, /Refine, audit, and deploy the existing first-draft website/);
-assert.match(sitePrompt, /Do not redesign from scratch/);
-assert.match(sitePrompt, /Run the refine-landing-page pass/);
-assert.match(sitePrompt, /Run the web-quality-audit pass/);
+assert.match(sitePrompt, /Deploy the existing first-draft website/);
+assert.match(sitePrompt, /Run production build/);
+assert.match(sitePrompt, /feat: build landing page/);
 assert.doesNotMatch(sitePrompt, /nextjs-site-building/);
 assert.match(sitePrompt, /You are done when you have a URL to the landing page/);
 
@@ -83,22 +76,3 @@ assert.equal(
 assert.equal(appendWithoutReplay("hello world", "world again"), " again");
 assert.equal(appendWithoutReplay("hello world", "hello world"), "");
 assert.equal(appendWithoutReplay("hello world", "fresh"), "fresh");
-
-const usageRows = usageCostRows({
-  inputTokens: 1000,
-  outputTokens: 500,
-  cachedInputTokens: 200,
-  cacheCreationInputTokens: 100,
-  reasoningTokens: 0,
-  requestCount: 2,
-  totalCost: 0,
-  marketCost: 0,
-}, {
-  input: 0.000001,
-  output: 0.000002,
-  cacheRead: 0.0000001,
-  cacheWrite: 0.0000015,
-});
-assert.deepEqual(usageRows.at(-1), { type: "Total", tokens: 1800, cost: 0.00217 });
-assert.match(formatUsageTable(usageRows), /\| Token type \| Tokens \| Cost \|/);
-assert.match(formatUsageTable(usageRows), /\| Total \| 1,800 \| \$0\.002170 \|/);

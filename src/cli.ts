@@ -1,11 +1,10 @@
-import { spawn } from "node:child_process";
 import { cleanupSandbox, commandOutput, continueRedesign, parseArgs, readRequired, refreshUsage, runRedesign } from "./redesign.js";
 
 const [cmd = "help", ...rest] = process.argv.slice(2);
 const usage = [
   "Usage:",
-  "  npm run redesign <url> [--slug <slug>] [--agent-id <id>] [--keep-sandbox]",
-  "  npm run continue -- --metrics <path> [--agent-id <id>]",
+  "  npm run redesign <url> [--slug <slug>] [--keep-sandbox]",
+  "  npm run continue -- --metrics <path>",
   "  npm run logs -- --sandbox <sandbox> --command <command>",
   "  npm run stop -- --sandbox <sandbox>",
   "  npm run usage -- --metrics <path>",
@@ -17,20 +16,6 @@ if (cmd === "help" || rest.includes("--help")) {
 }
 
 const { args, positional } = parseArgs(rest);
-const agentId = args.get("agent-id");
-
-if ((cmd === "redesign" || cmd === "continue") && agentId && process.env.REDESIGN_AGENT_SUBPROCESS !== "1") {
-  const child = spawn("npm", ["run", cmd, "--", ...rest], {
-    cwd: process.cwd(),
-    detached: true,
-    env: { ...process.env, REDESIGN_AGENT_SUBPROCESS: "1" },
-    stdio: "ignore",
-  });
-  child.unref();
-  console.log(`Subscribed ${cmd} job started.`);
-  console.log(`Agent: ${agentId}`);
-  process.exit(0);
-}
 
 try {
   if (cmd === "redesign") {
@@ -41,13 +26,12 @@ try {
       site,
       slug: args.get("slug"),
       keepSandbox: args.get("keep-sandbox") === "true",
-      agentId,
       timeoutMinutes: args.has("timeout") ? Number(args.get("timeout")) : undefined,
     });
   } else if (cmd === "logs") {
     console.log(await commandOutput(readRequired(args, "sandbox"), readRequired(args, "command")));
   } else if (cmd === "continue") {
-    await continueRedesign(readRequired(args, "metrics"), { agentId });
+    await continueRedesign(readRequired(args, "metrics"));
   } else if (cmd === "usage") {
     await refreshUsage(readRequired(args, "metrics"));
   } else if (cmd === "stop") {

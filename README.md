@@ -17,7 +17,7 @@ Fill in:
 - `VERCEL_TOKEN`: token the app uses to create a budgeted AI Gateway key for each job, and that OpenCode can use for the final intentional Vercel deploy.
 - `VERCEL_TEAM_ID`: recommended when the Gateway and deployments live under a Vercel team.
 
-Each job creates a fresh AI Gateway key with a default `$1` budget and deletes it when the job exits. The redesign flow is fixed: DeepSeek researches, Sol drafts the site, then DeepSeek refines, audits, and deploys.
+Each job creates a fresh AI Gateway key with a default `$1` budget and deletes it when the job exits. The redesign flow is fixed: DeepSeek researches, Sol creates the page draft, then DeepSeek builds, commits, and deploys.
 
 ## Start a Redesign
 

@@ -13,7 +13,6 @@ export type RedesignOptions = {
   slug?: string;
   timeoutMinutes?: number;
   keepSandbox?: boolean;
-  agentId?: string;
 };
 
 export type RedesignResult = {
@@ -26,7 +25,6 @@ export type RedesignResult = {
   model: string;
   aiGatewayBudget: number;
   metricsPath: string;
-  agentId?: string;
 };
 
 type AiGatewayUsage = {
@@ -41,12 +39,6 @@ type AiGatewayUsage = {
   requestCount: number;
 };
 
-type UsageCostRow = {
-  type: string;
-  tokens: number;
-  cost: number;
-};
-
 type ModelPricing = {
   input: number;
   output: number;
@@ -55,7 +47,6 @@ type ModelPricing = {
 };
 
 type RunMetrics = RedesignResult & {
-  agentId?: string;
   aiGatewayKeyId?: string;
   aiGatewayKeyName: string;
   startedAt: string;
@@ -76,8 +67,6 @@ const LOG_STREAM_IDLE_MS = 10_000;
 
 const skillFiles = [
   "nextjs-site-building",
-  "refine-landing-page",
-  "web-quality-audit",
 ] as const;
 
 export function parseArgs(argv: string[]) {
@@ -151,10 +140,6 @@ export function opencodeModelForGatewayModel(model: string) {
   return `vercel/${gatewayModelFromInput(model)}`;
 }
 
-export function resolveAgentId(agentId: string | undefined) {
-  return agentId === "current" ? process.env.CODEX_THREAD_ID : agentId;
-}
-
 function modelForContinue(previous: RunMetrics) {
   if (previous.phase === "draft" && typeof previous.draftModel === "string") return gatewayModelFromInput(previous.draftModel);
   if (previous.phase === "implementation" && typeof previous.implementationModel === "string") return gatewayModelFromInput(previous.implementationModel);
@@ -167,20 +152,16 @@ export function buildResearchPrompt(options: {
   repoUrl: string;
 }) {
   return [
-    `redesign ${options.site}.`,
+    `Research ${options.site}.`,
     "",
     `Project slug: ${options.slug}`,
     `GitHub repo: ${options.repoUrl}`,
     `Original URL: ${options.site}`,
     "",
-    "Task:",
-    "1) Scrape the URL for copy and images. Put copy in raw.md and images in an images directory.",
-    "2) Make a proof.md that directly copies and organizes all the business's demonstrated proof from raw.md. Examples of demonstrated proof are completed work, testimonials, awards, statistics, guarantees, credentials, press, partnerships, and anything the business has or has done that makes a potential customer trust them. Do not invent proof.",
-    "Stop after step 2. Do not build the site. Do not deploy.",
-    "Commit and push to main after raw.md/images, then again after proof.md.",
-    "Never print secrets, tokens, full environment variables, credential helper output, or auth headers.",
+    "1) Scrape the URL for copy and images. Put copy in raw.md and images in an images directory. Commit and push.",
+    "2) Make a proof.md that directly copies and organizes all the business's demonstrated proof from raw.md. Examples of demonstrated proof are completed work, testimonials, awards, statistics, guarantees, credentials, press, partnerships, and anything the business has or has done that makes a potential customer trust them. Do not invent proof. Commit and push.",
     "",
-    "You are done when raw.md, proof.md, and images/ exist and main is pushed to GitHub.",
+    "You are done when raw.md, proof.md, and images/ are pushed to GitHub.",
   ].join("\n");
 }
 
@@ -200,16 +181,12 @@ export function buildDraftPrompt(options: {
     `Original URL: ${options.site}`,
     "",
     "Task:",
-    "First make sure the current repo has the latest main from GitHub.",
-    "Build the site. Use the business's unique proof and project imagery to inspire the design.",
+    "Build the site in page.tsx. Use the business's unique proof to inspire the design.",
     "Typical structure: nav, hero, several proof sections, FAQ, final CTA, footer.",
-    "No text-only sections except nav, banners, the bar below hero, and footer. Do not repeat images or other media. There is one CTA; use it everywhere.",
-    "Automated tests are out of scope for this pilot. Run only the basic production build needed to prove the draft compiles.",
-    "Commit and push the first complete site to main with: feat: build landing page",
-    "Do not run the refine-landing-page pass. Do not run the web-quality-audit pass. Do not deploy.",
-    "Never print secrets, tokens, full environment variables, credential helper output, or auth headers.",
+    "No text-only sections except nav, banners, the bar below hero, and footer. Do not repeat images or other media.",
+    "There is one CTA; use it everywhere.",
     "",
-    "You are done when the first complete site is pushed to GitHub.",
+    "You are done when page.tsx is created. Don't build, commit, or push.",
   ].join("\n");
 }
 
@@ -220,34 +197,20 @@ export function buildSitePrompt(options: {
   expectedRedesignUrl: string;
 }) {
   return [
-    "Refine, audit, and deploy the existing first-draft website.",
-    "",
-    "Use these local skill files in order:",
-    "1. .opencode/skills/refine-landing-page/SKILL.md",
-    "2. .opencode/skills/web-quality-audit/SKILL.md",
+    "Deploy the existing first-draft website.",
     "",
     `Project slug: ${options.slug}`,
     `GitHub repo: ${options.repoUrl}`,
     `Original URL: ${options.site}`,
-    `Preferred redesign URL: ${options.expectedRedesignUrl}`,
+    `Expected redesign URL: ${options.expectedRedesignUrl}`,
     "",
     "Task:",
-    "First make sure the current repo has the latest main from GitHub.",
-    "Use proof.md as the content/proof source of truth. Use raw.md and images/ only as supporting source material.",
-    "Do not redesign from scratch. Improve the existing first draft.",
-    "Run the refine-landing-page pass.",
-    "Run the web-quality-audit pass.",
-    "Automated tests are out of scope for this pilot. Run only the basic production build needed to deploy.",
-    "Commit and push to main after each major phase, using this history:",
-    "   - after the refine pass: fix: refine landing page",
-    "   - after the audit/build pass: chore: pass audit and build",
-    "   If a push fails, stop and fix Git auth before continuing.",
+    "Run production build needed to prove the draft compiles.",
+    "Commit and push the first complete site to main with: feat: build landing page",
     "Deploy intentionally exactly once with the Vercel CLI after the site is finished. Use the slug as the Vercel project name.",
     `Add ${new URL(options.expectedRedesignUrl).host} to the ${options.slug} Vercel project, then alias the final deployment to ${options.expectedRedesignUrl} with the Vercel CLI. The final Redesign URL must be ${options.expectedRedesignUrl}, not a vercel.app URL.`,
-    "Never print secrets, tokens, full environment variables, credential helper output, or auth headers.",
     "",
     "You are done when you have a URL to the landing page.",
-    "At the very end, print a short final block with Original URL, Redesign URL, GitHub repo, and slug.",
   ].join("\n");
 }
 
@@ -351,46 +314,17 @@ async function streamUntilFinished(command: Command, _startedAt: number) {
   return { output, finished: result };
 }
 
-export function usageCostRows(usage: AiGatewayUsage, pricing: ModelPricing) {
-  const rows = [
-    { type: "Input", tokens: usage.inputTokens, cost: usage.inputTokens * pricing.input },
-    { type: "Output", tokens: usage.outputTokens, cost: usage.outputTokens * pricing.output },
-    { type: "Cache read", tokens: usage.cachedInputTokens, cost: usage.cachedInputTokens * pricing.cacheRead },
-    { type: "Cache write", tokens: usage.cacheCreationInputTokens, cost: usage.cacheCreationInputTokens * pricing.cacheWrite },
-  ];
-  return [
-    ...rows,
-    {
-      type: "Total",
-      tokens: rows.reduce((sum, row) => sum + row.tokens, 0),
-      cost: rows.reduce((sum, row) => sum + row.cost, 0),
-    },
-  ] satisfies UsageCostRow[];
-}
-
-export function formatUsageTable(rows: UsageCostRow[]) {
-  const lines = [
-    "| Token type | Tokens | Cost |",
-    "| --- | ---: | ---: |",
-    ...rows.map((row) => `| ${row.type} | ${row.tokens.toLocaleString("en-US")} | ${money(row.cost)} |`),
-  ];
-  return lines.join("\n");
-}
-
-async function usageTablesByModel(usages: AiGatewayUsage[]) {
-  return Promise.all(usages.map(async (usage) => {
-    const pricing = await modelPricing(usage.model ?? "");
-    return { usage, pricing, rows: usageCostRows(usage, pricing) };
-  }));
-}
-
 async function estimateUsageForModel(usage: AiGatewayUsage) {
   const pricing = await modelPricing(usage.model ?? "");
-  const rows = usageCostRows(usage, pricing);
+  const totalCost =
+    usage.inputTokens * pricing.input +
+    usage.outputTokens * pricing.output +
+    usage.cachedInputTokens * pricing.cacheRead +
+    usage.cacheCreationInputTokens * pricing.cacheWrite;
   return {
     ...usage,
-    totalCost: rows.at(-1)?.cost ?? 0,
-    marketCost: rows.at(-1)?.cost ?? 0,
+    totalCost,
+    marketCost: totalCost,
   };
 }
 
@@ -526,6 +460,13 @@ function withoutReportedUsage<T extends Record<string, unknown>>(metrics: T) {
   return rest;
 }
 
+async function pricingByModel(usages: AiGatewayUsage[]) {
+  return Object.fromEntries(await Promise.all(usages.map(async (usage) => [
+    usage.model ?? "",
+    await modelPricing(usage.model ?? ""),
+  ])));
+}
+
 export async function refreshUsage(metricsPath: string) {
   const metrics = JSON.parse(await readFile(metricsPath, "utf8")) as {
     sandbox: string;
@@ -550,21 +491,21 @@ export async function refreshUsage(metricsPath: string) {
     const usageByModel = await estimateOpenCodeUsage(sandbox, [...new Set(models)]);
     if (!usageByModel) throw new Error("OpenCode usage is not available");
 
-    const usageTables = await usageTablesByModel(usageByModel);
+    const pricing = await pricingByModel(usageByModel);
     const totalUsage = sumUsage(usageByModel);
     const nextMetrics = {
       ...withoutReportedUsage(metrics),
       estimatedUsageByModel: usageByModel,
-      estimatedUsageTables: usageTables,
+      estimatedPricingByModel: pricing,
       estimatedTotalUsage: totalUsage,
     };
     await writeRunMetrics(metricsPath, nextMetrics);
 
-    for (const table of usageTables) {
-      console.log(`\nModel: ${table.usage.model}`);
-      console.log(formatUsageTable(table.rows));
-      console.log(`OpenCode sessions: ${table.usage.requestCount}`);
-      console.log(`Estimated total: ${money(table.usage.totalCost)}`);
+    for (const usage of usageByModel) {
+      console.log(`\nModel: ${usage.model}`);
+      console.log(`Tokens: input ${usage.inputTokens.toLocaleString("en-US")}, output ${usage.outputTokens.toLocaleString("en-US")}, cache read ${usage.cachedInputTokens.toLocaleString("en-US")}, cache write ${usage.cacheCreationInputTokens.toLocaleString("en-US")}`);
+      console.log(`OpenCode sessions: ${usage.requestCount}`);
+      console.log(`Estimated total: ${money(usage.totalCost)}`);
     }
     console.log(`\nCombined OpenCode sessions: ${totalUsage.requestCount}`);
     console.log(`Combined estimated total: ${money(totalUsage.totalCost)}`);
@@ -575,16 +516,14 @@ export async function refreshUsage(metricsPath: string) {
   if (!usage) throw new Error("OpenCode usage is not available");
 
   const pricing = await modelPricing(metrics.model);
-  const usageTable = usageCostRows(usage, pricing);
   const nextMetrics = {
     ...withoutReportedUsage(metrics),
     estimatedUsage: usage,
     estimatedPricing: pricing,
-    estimatedUsageTable: usageTable,
   };
   await writeRunMetrics(metricsPath, nextMetrics);
 
-  console.log(formatUsageTable(usageTable));
+  console.log(`Tokens: input ${usage.inputTokens.toLocaleString("en-US")}, output ${usage.outputTokens.toLocaleString("en-US")}, cache read ${usage.cachedInputTokens.toLocaleString("en-US")}, cache write ${usage.cacheCreationInputTokens.toLocaleString("en-US")}`);
   console.log(`OpenCode sessions: ${usage.requestCount}`);
   console.log(`Estimated total: ${money(usage.totalCost)}`);
   return nextMetrics;
@@ -738,13 +677,12 @@ async function localSkillCopies() {
   })));
 }
 
-export async function continueRedesign(previousMetricsPath: string, options: { agentId?: string } = {}): Promise<RedesignResult> {
+export async function continueRedesign(previousMetricsPath: string): Promise<RedesignResult> {
   const previous = await readRunMetrics(previousMetricsPath);
   if (previous.status === "succeeded") {
     throw new Error(`Run already succeeded: ${previous.redesignUrl ?? previous.expectedRedesignUrl}`);
   }
 
-  const agentId = resolveAgentId(options.agentId) ?? previous.agentId;
   const model = modelForContinue(previous);
   const opencodeModel = opencodeModelForGatewayModel(model);
   const budget = Number(previous.aiGatewayBudget || DEFAULT_AI_GATEWAY_BUDGET);
@@ -764,7 +702,6 @@ export async function continueRedesign(previousMetricsPath: string, options: { a
     model,
     aiGatewayBudget: budget,
     metricsPath,
-    agentId,
   };
 
   try {
@@ -805,7 +742,6 @@ export async function continueRedesign(previousMetricsPath: string, options: { a
     const endMs = Date.now();
     const usage = (await estimateOpenCodeUsage(sandbox, [model]))?.[0];
     const pricing = usage ? await modelPricing(model) : undefined;
-    const usageTable = usage && pricing ? usageCostRows(usage, pricing) : undefined;
     const terminalMetrics = {
       ...result,
       previousMetricsPath,
@@ -820,7 +756,6 @@ export async function continueRedesign(previousMetricsPath: string, options: { a
       outputTail: finished.exitCode === 0 ? undefined : outputTail(output),
       estimatedUsage: usage,
       estimatedPricing: pricing,
-      estimatedUsageTable: usageTable,
       aiGatewayKeyDeletedAt: finished.exitCode === 0 && aiGatewayKey ? new Date().toISOString() : previous.aiGatewayKeyDeletedAt,
     };
 
@@ -838,8 +773,8 @@ export async function continueRedesign(previousMetricsPath: string, options: { a
       console.error(outputTail(output));
     }
 
-    if (usageTable && usage) {
-      console.log(formatUsageTable(usageTable));
+    if (usage) {
+      console.log(`Tokens: input ${usage.inputTokens.toLocaleString("en-US")}, output ${usage.outputTokens.toLocaleString("en-US")}, cache read ${usage.cachedInputTokens.toLocaleString("en-US")}, cache write ${usage.cacheCreationInputTokens.toLocaleString("en-US")}`);
       console.log(`OpenCode sessions: ${usage.requestCount}`);
       console.log(`Estimated total: ${money(usage.totalCost)}`);
     } else {
@@ -880,7 +815,6 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
   const vercelToken = process.env.VERCEL_TOKEN ?? "";
   const startMs = Date.now();
   const metricsPath = join(process.cwd(), "runs", `${new Date(startMs).toISOString().replace(/[:.]/g, "-")}-${slug}.json`);
-  const agentId = resolveAgentId(options.agentId);
 
   if (!githubToken) throw new Error("Missing GITHUB_TOKEN");
 
@@ -897,7 +831,6 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
     model: `${researchModel} + ${draftModel} + ${implementationModel}`,
     aiGatewayBudget: aiGatewayKey.budget,
     metricsPath,
-    agentId,
   };
 
   try {
@@ -939,8 +872,6 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
     await must(await sandbox.runCommand("mkdir", [
       "-p",
       `${WORKDIR}/.opencode/skills/nextjs-site-building`,
-      `${WORKDIR}/.opencode/skills/refine-landing-page`,
-      `${WORKDIR}/.opencode/skills/web-quality-audit`,
       "/home/vercel-sandbox/.config/opencode",
     ]), "mkdir");
 
@@ -1054,7 +985,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
     const endMs = Date.now();
     const wallTimeSeconds = Math.round((endMs - startMs) / 1000);
     const usageByModel = await estimateOpenCodeUsage(sandbox, usageModels);
-    const usageTables = usageByModel ? await usageTablesByModel(usageByModel) : undefined;
+    const pricing = usageByModel ? await pricingByModel(usageByModel) : undefined;
     const totalUsage = usageByModel ? sumUsage(usageByModel) : undefined;
 
     await writeRunMetrics(metricsPath, {
@@ -1073,7 +1004,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       draftCommand: draft.cmdId,
       implementationCommand: build.cmdId,
       estimatedUsageByModel: usageByModel,
-      estimatedUsageTables: usageTables,
+      estimatedPricingByModel: pricing,
       estimatedTotalUsage: totalUsage,
       aiGatewayKeyDeletedAt: new Date().toISOString(),
     });
@@ -1086,12 +1017,12 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
     console.log(`GitHub repo: ${repo.htmlUrl}`);
     console.log(`Slug: ${slug}`);
     console.log(`Wall time: ${wallTimeSeconds}s`);
-    if (usageTables && totalUsage) {
-      for (const table of usageTables) {
-        console.log(`\nModel: ${table.usage.model}`);
-        console.log(formatUsageTable(table.rows));
-        console.log(`OpenCode sessions: ${table.usage.requestCount}`);
-        console.log(`Estimated total: ${money(table.usage.totalCost)}`);
+    if (usageByModel && totalUsage) {
+      for (const usage of usageByModel) {
+        console.log(`\nModel: ${usage.model}`);
+        console.log(`Tokens: input ${usage.inputTokens.toLocaleString("en-US")}, output ${usage.outputTokens.toLocaleString("en-US")}, cache read ${usage.cachedInputTokens.toLocaleString("en-US")}, cache write ${usage.cacheCreationInputTokens.toLocaleString("en-US")}`);
+        console.log(`OpenCode sessions: ${usage.requestCount}`);
+        console.log(`Estimated total: ${money(usage.totalCost)}`);
       }
       console.log(`\nCombined OpenCode sessions: ${totalUsage.requestCount}`);
       console.log(`Combined estimated total: ${money(totalUsage.totalCost)}`);
@@ -1106,6 +1037,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
   } catch (error) {
     const endMs = Date.now();
     const usageByModel = sandbox ? await estimateOpenCodeUsage(sandbox, usageModels) : undefined;
+    const pricing = usageByModel ? await pricingByModel(usageByModel) : undefined;
     await writeRunMetrics(metricsPath, {
       ...result,
       aiGatewayKeyId: aiGatewayKey.id,
@@ -1118,6 +1050,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       draftModel,
       implementationModel,
       estimatedUsageByModel: usageByModel,
+      estimatedPricingByModel: pricing,
       estimatedTotalUsage: usageByModel ? sumUsage(usageByModel) : undefined,
       error: error instanceof Error ? error.message : String(error),
     });
