@@ -14,10 +14,13 @@
   },
   "dependencies": {
     "@vercel/sandbox": "^2.9.0",
-    "dotenv": "^17.2.3"
+    "cheerio": "^1.2.0",
+    "dotenv": "^17.2.3",
+    "turndown": "^7.2.4"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
+    "@types/turndown": "^5.0.6",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
   }

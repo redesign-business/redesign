@@ -13,6 +13,7 @@ import {
   parseArgs,
   slugFromUrl,
 } from "./redesign.js";
+import { normalizeSameDomainUrl, parseSrcset } from "./research.js";
 
 const parsed = parseArgs(["https://acme.test", "--slug", "Acme Plumbing", "--keep-sandbox"]);
 assert.deepEqual(parsed.positional, ["https://acme.test"]);
@@ -34,9 +35,9 @@ const researchPrompt = buildResearchPrompt({
   slug: "acme",
   repoUrl: "https://github.com/redesign-business/acme",
 });
-assert.match(researchPrompt, /1\) Scrape the URL for copy and images/);
-assert.match(researchPrompt, /2\) Make a proof\.md/);
-assert.match(researchPrompt, /raw\.md, proof\.md, and images\/ are pushed/);
+assert.match(researchPrompt, /raw\.md already contains/);
+assert.match(researchPrompt, /public\/images\/manifest\.json/);
+assert.match(researchPrompt, /Commit and push proof\.md/);
 assert.doesNotMatch(researchPrompt, /Build the site/);
 
 const draftPrompt = buildDraftPrompt({
@@ -46,6 +47,7 @@ const draftPrompt = buildDraftPrompt({
 });
 assert.match(draftPrompt, /Build the first draft/);
 assert.match(draftPrompt, /\.opencode\/skills\/nextjs-site-building\/SKILL\.md/);
+assert.match(draftPrompt, /public\/images\/manifest\.json/);
 assert.match(draftPrompt, /Build the site in page\.tsx/);
 assert.match(draftPrompt, /Don't build, commit, or push/);
 
@@ -76,3 +78,20 @@ assert.equal(
 assert.equal(appendWithoutReplay("hello world", "world again"), " again");
 assert.equal(appendWithoutReplay("hello world", "hello world"), "");
 assert.equal(appendWithoutReplay("hello world", "fresh"), "fresh");
+
+assert.equal(
+  normalizeSameDomainUrl("/about#team", "https://acme.test/", "https://acme.test"),
+  "https://acme.test/about",
+);
+assert.equal(
+  normalizeSameDomainUrl("https://other.test/about", "https://acme.test/", "https://acme.test"),
+  undefined,
+);
+assert.equal(
+  normalizeSameDomainUrl("/logo.png", "https://acme.test/", "https://acme.test"),
+  undefined,
+);
+assert.deepEqual(
+  parseSrcset("/small.jpg 400w, https://acme.test/large.jpg 1200w", "https://acme.test/work/"),
+  ["https://acme.test/small.jpg", "https://acme.test/large.jpg"],
+);

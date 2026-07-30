@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { config as loadEnv } from "dotenv";
 import { Command, CommandFinished, Sandbox } from "@vercel/sandbox";
+import { collectResearchFiles } from "./research.js";
 
 loadEnv({ path: ".env.local", quiet: true });
 
@@ -155,16 +156,19 @@ export function buildResearchPrompt(options: {
   repoUrl: string;
 }) {
   return [
-    `Research ${options.site}.`,
+    `Extract proof for ${options.site}.`,
     "",
     `Project slug: ${options.slug}`,
     `GitHub repo: ${options.repoUrl}`,
     `Original URL: ${options.site}`,
     "",
-    "1) Scrape the URL for copy and images. Put copy in raw.md and images in an images directory. Commit and push.",
-    "2) Make a proof.md that directly copies and organizes all the business's demonstrated proof from raw.md. Examples of demonstrated proof are completed work, testimonials, awards, statistics, guarantees, credentials, press, partnerships, and anything the business has or has done that makes a potential customer trust them. Do not invent proof. Commit and push.",
+    "raw.md already contains a simple crawl of same-domain pages converted from HTML to Markdown.",
+    "public/images/manifest.json lists downloaded images with page and section context.",
     "",
-    "You are done when raw.md, proof.md, and images/ are pushed to GitHub.",
+    "Make a proof.md that directly copies and organizes all the business's demonstrated proof from raw.md. Examples of demonstrated proof are completed work, testimonials, awards, statistics, guarantees, credentials, press, partnerships, and anything the business has or has done that makes a potential customer trust them. Do not invent proof.",
+    "Commit and push proof.md.",
+    "",
+    "You are done when proof.md is pushed to GitHub.",
   ].join("\n");
 }
 
@@ -174,7 +178,7 @@ export function buildDraftPrompt(options: {
   repoUrl: string;
 }) {
   return [
-    "Build the first draft of the website from proof.md, raw.md, and images/.",
+    "Build the first draft of the website from proof.md and public/images/manifest.json.",
     "",
     "Use this local skill file:",
     "1. .opencode/skills/nextjs-site-building/SKILL.md",
@@ -185,6 +189,7 @@ export function buildDraftPrompt(options: {
     "",
     "Task:",
     "Build the site in page.tsx. Use the business's unique proof to inspire the design.",
+    "Use image localPath values from public/images/manifest.json. Use the page title, nearest heading, surrounding context, filename, and source page to infer what each image was doing on the original site.",
     "Typical structure: nav, hero, several proof sections, FAQ, final CTA, footer.",
     "No text-only sections except nav, banners, the bar below hero, and footer. Do not repeat images or other media.",
     "There is one CTA; use it everywhere.",
@@ -844,6 +849,20 @@ async function localLogRelayWrapper() {
   return Buffer.from(await readFile(join(process.cwd(), "src", "log-relay-wrapper.mjs"), "utf8"));
 }
 
+async function commitResearchInputs(sandbox: Sandbox) {
+  await must(await sandbox.runCommand({
+    cmd: "bash",
+    args: ["-lc", [
+      "git add raw.md public/images",
+      "if git diff --cached --quiet; then",
+      "  echo 'No research inputs to commit';",
+      "else",
+      "  git commit -m 'chore: add scraped research inputs' && git push;",
+      "fi",
+    ].join("\n")],
+  }), "research input commit");
+}
+
 export async function continueRedesign(previousMetricsPath: string): Promise<RedesignResult> {
   const previous = await readRunMetrics(previousMetricsPath);
   if (previous.status === "succeeded") {
@@ -1054,7 +1073,9 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       "/home/vercel-sandbox/.config/opencode",
     ]), "mkdir");
 
+    const researchFiles = await collectResearchFiles(originalUrl, WORKDIR);
     await sandbox.writeFiles([
+      ...researchFiles,
       ...(await localSkillCopies()),
       {
         path: "/home/vercel-sandbox/.config/opencode/opencode.json",
@@ -1089,6 +1110,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
         content: Buffer.from(buildSitePrompt({ site: originalUrl, slug, repoUrl: repo.htmlUrl, expectedRedesignUrl })),
       },
     ]);
+    await commitResearchInputs(sandbox);
 
     await writeRunMetrics(metricsPath, {
       ...result,
