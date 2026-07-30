@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { config as loadEnv } from "dotenv";
 import { Command, CommandFinished, Sandbox } from "@vercel/sandbox";
-import { collectResearchFiles } from "./research.js";
 
 loadEnv({ path: ".env.local", quiet: true });
 
@@ -64,17 +63,11 @@ const DEFAULT_RESEARCH_MODEL = "deepseek/deepseek-v4-pro";
 const DEFAULT_DRAFT_MODEL = "openai/gpt-5.6-sol";
 const DEFAULT_IMPLEMENTATION_MODEL = "deepseek/deepseek-v4-pro";
 const DEFAULT_GITHUB_OWNER = "redesign-business";
-const DEFAULT_TEMPLATE_REPO = "https://github.com/redesign-business/template.git";
 const DEFAULT_BASE_DOMAIN = "redesign.business";
 const DEFAULT_AI_GATEWAY_BUDGET = 1;
 const LOG_STREAM_IDLE_MS = 10_000;
 const LOG_RELAY_RECONNECT_MS = 500;
 const MAX_PHASE_CONTINUES = Number(process.env.REDESIGN_MAX_PHASE_CONTINUES ?? 5);
-const MAX_BUILD_REPAIRS = Number(process.env.REDESIGN_MAX_BUILD_REPAIRS ?? 5);
-
-const skillFiles = [
-  "nextjs-site-building",
-] as const;
 
 export function parseArgs(argv: string[]) {
   const args = new Map<string, string>();
@@ -871,135 +864,8 @@ async function deleteAiGatewayKey(id: string) {
   }
 }
 
-async function localSkillCopies() {
-  return Promise.all(skillFiles.map(async (name) => ({
-    path: `${WORKDIR}/.opencode/skills/${name}/SKILL.md`,
-    content: Buffer.from(await readFile(join(process.cwd(), "skills", name, "SKILL.md"), "utf8")),
-  })));
-}
-
 async function localLogRelayWrapper() {
   return Buffer.from(await readFile(join(process.cwd(), "src", "log-relay-wrapper.mjs"), "utf8"));
-}
-
-async function commitResearchInputs(sandbox: Sandbox) {
-  await must(await sandbox.runCommand({
-    cmd: "bash",
-    args: ["-lc", [
-      "git add raw.md public/images",
-      "if git diff --cached --quiet; then",
-      "  echo 'No research inputs to commit';",
-      "else",
-      "  git commit -m 'chore: add scraped research inputs' && git push;",
-      "fi",
-    ].join("\n")],
-  }), "research input commit");
-}
-
-async function runSandboxShell(sandbox: Sandbox, label: string, script: string, startMs: number, env?: Record<string, string>) {
-  const command = await sandbox.runCommand({
-    cmd: "bash",
-    args: ["-lc", script],
-    env,
-  });
-  const run = await streamUntilFinished(command, startMs);
-  if (run.finished.exitCode !== 0) {
-    throw new Error(`${label} failed\n${outputTail(run.output)}`);
-  }
-  return { command, output: run.output };
-}
-
-async function runSandboxShellAttempt(sandbox: Sandbox, script: string, startMs: number, env?: Record<string, string>) {
-  const command = await sandbox.runCommand({
-    cmd: "bash",
-    args: ["-lc", script],
-    env,
-  });
-  const run = await streamUntilFinished(command, startMs);
-  return { command, output: run.output, exitCode: run.finished.exitCode };
-}
-
-async function seedTemplate(sandbox: Sandbox, startMs: number) {
-  await runSandboxShell(sandbox, "template seed", [
-    "tmp=$(mktemp -d)",
-    `git clone --depth 1 ${DEFAULT_TEMPLATE_REPO} "$tmp"`,
-    "shopt -s dotglob",
-    "for item in \"$tmp\"/*; do",
-    "  [ \"$(basename \"$item\")\" = .git ] && continue",
-    "  cp -a \"$item\" .",
-    "done",
-    "rm -rf \"$tmp\"",
-    "git add -A",
-    "git commit -m 'chore: seed nextjs template' || true",
-    "git push",
-  ].join("\n"), startMs);
-}
-
-async function buildWithRepairs(options: {
-  sandbox: Sandbox;
-  relay?: LogRelay;
-  model: string;
-  startMs: number;
-}) {
-  await runSandboxShell(options.sandbox, "dependency install", "corepack enable && pnpm install --frozen-lockfile", options.startMs);
-
-  const builds: string[] = [];
-  const repairs: string[] = [];
-  for (let attempt = 0; attempt <= MAX_BUILD_REPAIRS; attempt += 1) {
-    const build = await runSandboxShellAttempt(options.sandbox, "pnpm build", options.startMs);
-    builds.push(build.command.cmdId);
-    if (build.exitCode === 0) return { builds, repairs };
-    if (attempt === MAX_BUILD_REPAIRS) throw new Error(`build failed after ${MAX_BUILD_REPAIRS} repairs\n${outputTail(build.output)}`);
-
-    await options.sandbox.writeFiles([{
-      path: "/tmp/build-repair-prompt.md",
-      content: Buffer.from(buildRepairPrompt(outputTail(build.output, 12_000))),
-    }]);
-    const repair = await runOpenCodePhase({
-      sandbox: options.sandbox,
-      relay: options.relay,
-      phase: "build-repair",
-      model: options.model,
-      startMs: options.startMs,
-      args: ["run", "Follow the attached build repair prompt.", "--auto", "--dir", WORKDIR, "--title", "Build repair", "--model", opencodeModelForGatewayModel(options.model), "--file", "/tmp/build-repair-prompt.md"],
-    });
-    repairs.push(...repair.attempts);
-  }
-
-  return { builds, repairs };
-}
-
-async function commitAndPushSite(sandbox: Sandbox, startMs: number) {
-  await runSandboxShell(sandbox, "site commit", [
-    "git add -A",
-    "git commit -m 'feat: build landing page' || true",
-    "git push",
-  ].join("\n"), startMs);
-}
-
-async function deployFromSandbox(sandbox: Sandbox, expectedRedesignUrl: string, slug: string, startMs: number) {
-  const host = new URL(expectedRedesignUrl).host;
-  const { output, command } = await runSandboxShell(sandbox, "Vercel deploy", [
-    "set -euo pipefail",
-    "scope=()",
-    "team=()",
-    "if [ -n \"${VERCEL_TEAM_ID:-}\" ]; then scope=(--scope \"$VERCEL_TEAM_ID\"); fi",
-    "if [ -n \"${VERCEL_TEAM_ID:-}\" ]; then team=(--team \"$VERCEL_TEAM_ID\"); fi",
-    "npx --yes vercel link --yes --project \"$REDESIGN_SLUG\" \"${team[@]}\"",
-    "npx --yes vercel deploy --yes \"${scope[@]}\" | tee /tmp/vercel-deploy.out",
-    "deployment_url=$(grep -Eo 'https://[^[:space:]]+\\.vercel\\.app[^[:space:]]*' /tmp/vercel-deploy.out | tail -n 1)",
-    "[ -n \"$deployment_url\" ]",
-    "echo \"Deployment URL: $deployment_url\"",
-    "npx --yes vercel domains add \"$REDESIGN_HOST\" \"$REDESIGN_SLUG\" --force \"${scope[@]}\" || true",
-    "npx --yes vercel alias set \"$deployment_url\" \"$REDESIGN_HOST\" \"${scope[@]}\"",
-    "echo \"Redesign URL: https://$REDESIGN_HOST\"",
-  ].join("\n"), startMs, {
-    REDESIGN_SLUG: slug,
-    REDESIGN_HOST: host,
-    VERCEL_TOKEN: process.env.VERCEL_TOKEN ?? "",
-    VERCEL_TEAM_ID: process.env.VERCEL_TEAM_ID ?? "",
-  });
-  return { redesignUrl: extractRedesignUrl(output) ?? expectedRedesignUrl, command: command.cmdId };
 }
 
 export async function continueRedesign(previousMetricsPath: string): Promise<RedesignResult> {
@@ -1138,7 +1004,6 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
   const researchModel = DEFAULT_RESEARCH_MODEL;
   const draftModel = DEFAULT_DRAFT_MODEL;
   const implementationModel = DEFAULT_IMPLEMENTATION_MODEL;
-  const usageModels = [...new Set([researchModel, draftModel, implementationModel])];
   const baseDomain = process.env.REDESIGN_BASE_DOMAIN ?? DEFAULT_BASE_DOMAIN;
   const expectedRedesignUrl = `https://${slug}.${baseDomain}`;
   const relay = logRelayFromEnv(slug);
@@ -1151,7 +1016,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
 
   const aiGatewayKey = await createAiGatewayKey(slug);
   let sandbox: Sandbox | undefined;
-  let currentPhase: "research" | "draft" | "build" | "deploy" | undefined;
+  let runnerStarted = false;
 
   const result: RedesignResult = {
     sandbox: "",
@@ -1195,60 +1060,36 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
     });
     result.sandbox = sandbox.name;
 
-    await must(await sandbox.runCommand("npm", ["install", "--prefix", "/home/vercel-sandbox/.opencode", "opencode-ai@1.18.9"]), "OpenCode install");
-    await must(await sandbox.runCommand({
-      cmd: "bash",
-      args: ["-lc", [
-        "git config user.name redesign-hosted-2",
-        "git config user.email redesign-hosted-2@users.noreply.github.com",
-        "git config credential.helper '!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f'",
-        "git ls-remote origin HEAD >/dev/null",
-      ].join(" && ")],
-      env: { GITHUB_TOKEN: githubToken },
-    }), "git setup");
-
-    await seedTemplate(sandbox, startMs);
-
-    await must(await sandbox.runCommand("mkdir", [
-      "-p",
-      `${WORKDIR}/.opencode/skills/nextjs-site-building`,
-      "/home/vercel-sandbox/.config/opencode",
-    ]), "mkdir");
-
-    const researchFiles = await collectResearchFiles(originalUrl, WORKDIR);
+    await must(await sandbox.runCommand("mkdir", ["-p", "/tmp/redesign-runner/src", "/tmp/redesign-runner/skills/nextjs-site-building"]), "runner mkdir");
     await sandbox.writeFiles([
-      ...researchFiles,
-      ...(await localSkillCopies()),
       {
-        path: "/home/vercel-sandbox/.config/opencode/opencode.json",
+        path: "/tmp/redesign-runner/package.json",
         content: Buffer.from(JSON.stringify({
-          $schema: "https://opencode.ai/config.json",
-          enabled_providers: ["vercel"],
-          model: opencodeModelForGatewayModel(researchModel),
-          provider: {
-            vercel: {
-              npm: "@ai-sdk/gateway",
-              env: ["AI_GATEWAY_API_KEY"],
-              options: { apiKey: "{env:AI_GATEWAY_API_KEY}" },
-              models: Object.fromEntries(usageModels.map((model) => [model, {}])),
-            },
+          type: "module",
+          dependencies: {
+            cheerio: "^1.2.0",
+            turndown: "^7.2.4",
+            tsx: "^4.20.6",
           },
         }, null, 2)),
+      },
+      {
+        path: "/tmp/redesign-runner/src/cloud-runner.ts",
+        content: Buffer.from(await readFile(join(process.cwd(), "src", "cloud-runner.ts"), "utf8")),
+      },
+      {
+        path: "/tmp/redesign-runner/src/research.ts",
+        content: Buffer.from(await readFile(join(process.cwd(), "src", "research.ts"), "utf8")),
+      },
+      {
+        path: "/tmp/redesign-runner/skills/nextjs-site-building/SKILL.md",
+        content: Buffer.from(await readFile(join(process.cwd(), "skills", "nextjs-site-building", "SKILL.md"), "utf8")),
       },
       ...(relay ? [{
         path: LOG_RELAY_WRAPPER_PATH,
         content: await localLogRelayWrapper(),
       }] : []),
-      {
-        path: "/tmp/research-prompt.md",
-        content: Buffer.from(buildResearchPrompt({ site: originalUrl, slug, repoUrl: repo.htmlUrl })),
-      },
-      {
-        path: "/tmp/draft-prompt.md",
-        content: Buffer.from(buildDraftPrompt({ site: originalUrl, slug, repoUrl: repo.htmlUrl })),
-      },
     ]);
-    await commitResearchInputs(sandbox);
 
     await writeRunMetrics(metricsPath, {
       ...result,
@@ -1256,7 +1097,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       aiGatewayKeyName: aiGatewayKey.name,
       startedAt: new Date(startMs).toISOString(),
       status: "running",
-      phase: "research",
+      phase: "cloud-runner",
       researchModel,
       draftModel,
       implementationModel,
@@ -1264,125 +1105,56 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
 
     console.log(JSON.stringify(result, null, 2));
 
-    currentPhase = "research";
-    const researchRun = await runOpenCodePhase({
-      sandbox,
-      relay,
-      phase: "research",
-      model: researchModel,
-      startMs,
-      args: ["run", "Follow the attached redesign prompt.", "--auto", "--dir", WORKDIR, "--title", `Research ${slug}`, "--model", opencodeModelForGatewayModel(researchModel), "--file", "/tmp/research-prompt.md"],
-      onCommand: async (command, attempts) => {
-        result.command = command.cmdId;
-        await writeRunMetrics(metricsPath, {
-          ...result,
-          aiGatewayKeyId: aiGatewayKey.id,
-          aiGatewayKeyName: aiGatewayKey.name,
-          startedAt: new Date(startMs).toISOString(),
-          status: "running",
-          phase: "research",
-          researchModel,
-          draftModel,
-          implementationModel,
-          researchCommand: command.cmdId,
-          researchAttempts: attempts,
-        });
+    const command = await sandbox.runCommand({
+      cmd: "bash",
+      args: ["-lc", "npm install && npx tsx src/cloud-runner.ts"],
+      cwd: "/tmp/redesign-runner",
+      detached: true,
+      env: {
+        AI_GATEWAY_API_KEY: aiGatewayKey.key,
+        GITHUB_TOKEN: githubToken,
+        GIT_USERNAME: "x-access-token",
+        GIT_PASSWORD: githubToken,
+        GH_TOKEN: githubToken,
+        VERCEL_TOKEN: vercelToken,
+        VERCEL_TEAM_ID: process.env.VERCEL_TEAM_ID ?? "",
+        OPENCODE_DISABLE_AUTOUPDATE: "true",
+        OPENCODE_DISABLE_MODELS_FETCH: "true",
+        ...(relay ? {
+          LOG_RELAY_URL: relay.url,
+          LOG_RELAY_TOKEN: relay.token,
+          LOG_RELAY_RUN_ID: relay.runId,
+        } : {}),
+        REDESIGN_SITE: originalUrl,
+        REDESIGN_SLUG: slug,
+        REDESIGN_REPO_URL: repo.htmlUrl,
+        REDESIGN_EXPECTED_URL: expectedRedesignUrl,
+        REDESIGN_STARTED_AT: new Date(startMs).toISOString(),
+        REDESIGN_SANDBOX: sandbox.name,
+        AI_GATEWAY_KEY_ID: aiGatewayKey.id,
+        AI_GATEWAY_KEY_NAME: aiGatewayKey.name,
+        AI_GATEWAY_BUDGET: String(aiGatewayKey.budget),
       },
     });
-
+    result.command = command.cmdId;
+    runnerStarted = true;
     await writeRunMetrics(metricsPath, {
       ...result,
       aiGatewayKeyId: aiGatewayKey.id,
       aiGatewayKeyName: aiGatewayKey.name,
       startedAt: new Date(startMs).toISOString(),
       status: "running",
-      phase: "draft",
+      phase: "cloud-runner",
       researchModel,
       draftModel,
       implementationModel,
-      researchCommand: researchRun.command.cmdId,
-      researchAttempts: researchRun.attempts,
+      runnerCommand: command.cmdId,
     });
 
-    currentPhase = "draft";
-    const draftRun = await runOpenCodePhase({
-      sandbox,
-      relay,
-      phase: "draft",
-      model: draftModel,
-      startMs,
-      args: ["run", "git pull --ff-only && follow the attached first-draft prompt.", "--auto", "--dir", WORKDIR, "--title", `Draft ${slug}`, "--model", opencodeModelForGatewayModel(draftModel), "--file", "/tmp/draft-prompt.md"],
-      onCommand: async (command, attempts) => {
-        result.command = command.cmdId;
-        await writeRunMetrics(metricsPath, {
-          ...result,
-          aiGatewayKeyId: aiGatewayKey.id,
-          aiGatewayKeyName: aiGatewayKey.name,
-          startedAt: new Date(startMs).toISOString(),
-          status: "running",
-          phase: "draft",
-          researchModel,
-          draftModel,
-          implementationModel,
-          researchCommand: researchRun.command.cmdId,
-          researchAttempts: researchRun.attempts,
-          draftCommand: command.cmdId,
-          draftAttempts: attempts,
-        });
-      },
-    });
-
-    await writeRunMetrics(metricsPath, {
-      ...result,
-      aiGatewayKeyId: aiGatewayKey.id,
-      aiGatewayKeyName: aiGatewayKey.name,
-      startedAt: new Date(startMs).toISOString(),
-      status: "running",
-      phase: "build",
-      researchModel,
-      draftModel,
-      implementationModel,
-      researchCommand: researchRun.command.cmdId,
-      researchAttempts: researchRun.attempts,
-      draftCommand: draftRun.command.cmdId,
-      draftAttempts: draftRun.attempts,
-    });
-
-    currentPhase = "build";
-    const buildRun = await buildWithRepairs({
-      sandbox,
-      relay,
-      model: implementationModel,
-      startMs,
-    });
-
-    await writeRunMetrics(metricsPath, {
-      ...result,
-      aiGatewayKeyId: aiGatewayKey.id,
-      aiGatewayKeyName: aiGatewayKey.name,
-      startedAt: new Date(startMs).toISOString(),
-      status: "running",
-      phase: "deploy",
-      researchModel,
-      draftModel,
-      implementationModel,
-      researchCommand: researchRun.command.cmdId,
-      researchAttempts: researchRun.attempts,
-      draftCommand: draftRun.command.cmdId,
-      draftAttempts: draftRun.attempts,
-      buildCommands: buildRun.builds,
-      repairCommands: buildRun.repairs,
-    });
-
-    currentPhase = "deploy";
-    await commitAndPushSite(sandbox, startMs);
-    const deployRun = await deployFromSandbox(sandbox, expectedRedesignUrl, slug, startMs);
-    const redesignUrl = deployRun.redesignUrl;
+    const { output, finished } = await streamUntilFinished(command, startMs);
     const endMs = Date.now();
     const wallTimeSeconds = Math.round((endMs - startMs) / 1000);
-    const usageByModel = await estimateOpenCodeUsage(sandbox, usageModels);
-    const pricing = usageByModel ? await pricingByModel(usageByModel) : undefined;
-    const totalUsage = usageByModel ? sumUsage(usageByModel) : undefined;
+    const redesignUrl = extractRedesignUrl(output);
 
     await writeRunMetrics(metricsPath, {
       ...result,
@@ -1391,53 +1163,33 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       startedAt: new Date(startMs).toISOString(),
       endedAt: new Date(endMs).toISOString(),
       wallTimeSeconds,
-      status: "succeeded",
+      status: finished.exitCode === 0 ? "succeeded" : "failed",
+      exitCode: finished.exitCode,
       redesignUrl,
       researchModel,
       draftModel,
       implementationModel,
-      researchCommand: researchRun.command.cmdId,
-      researchAttempts: researchRun.attempts,
-      draftCommand: draftRun.command.cmdId,
-      draftAttempts: draftRun.attempts,
-      buildCommands: buildRun.builds,
-      repairCommands: buildRun.repairs,
-      deployCommand: deployRun.command,
-      estimatedUsageByModel: usageByModel,
-      estimatedPricingByModel: pricing,
-      estimatedTotalUsage: totalUsage,
-      aiGatewayKeyDeletedAt: new Date().toISOString(),
+      runnerCommand: command.cmdId,
+      outputTail: finished.exitCode === 0 ? undefined : outputTail(output),
     });
 
-    if (options.keepSandbox) await sandbox.stop();
-    else await sandbox.delete();
+    if (finished.exitCode !== 0) {
+      console.error(`Sandbox left running for inspection: ${sandbox.name}`);
+      throw new Error(`Cloud runner failed with exit code ${finished.exitCode}`);
+    }
 
     console.log(`\nOriginal URL: ${originalUrl}`);
-    console.log(`Redesign URL: ${redesignUrl}`);
+    console.log(`Redesign URL: ${redesignUrl ?? expectedRedesignUrl}`);
     console.log(`GitHub repo: ${repo.htmlUrl}`);
     console.log(`Slug: ${slug}`);
     console.log(`Wall time: ${wallTimeSeconds}s`);
-    if (usageByModel && totalUsage) {
-      for (const usage of usageByModel) {
-        console.log(`\nModel: ${usage.model}`);
-        console.log(`Tokens: input ${usage.inputTokens.toLocaleString("en-US")}, output ${usage.outputTokens.toLocaleString("en-US")}, cache read ${usage.cachedInputTokens.toLocaleString("en-US")}, cache write ${usage.cacheCreationInputTokens.toLocaleString("en-US")}`);
-        console.log(`OpenCode sessions: ${usage.requestCount}`);
-        console.log(`Estimated total: ${money(usage.totalCost)}`);
-      }
-      console.log(`\nCombined OpenCode sessions: ${totalUsage.requestCount}`);
-      console.log(`Combined estimated total: ${money(totalUsage.totalCost)}`);
-    } else {
-      console.log("Estimated usage: unavailable from OpenCode session data");
-    }
     console.log(`AI Gateway budget: $${aiGatewayKey.budget}`);
     console.log(`Metrics: ${metricsPath}`);
 
-    await deleteAiGatewayKey(aiGatewayKey.id);
+    if (!options.keepSandbox) await sandbox.delete();
     return result;
   } catch (error) {
     const endMs = Date.now();
-    const usageByModel = sandbox ? await estimateOpenCodeUsage(sandbox, usageModels) : undefined;
-    const pricing = usageByModel ? await pricingByModel(usageByModel) : undefined;
     await writeRunMetrics(metricsPath, {
       ...result,
       aiGatewayKeyId: aiGatewayKey.id,
@@ -1446,16 +1198,13 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       endedAt: new Date(endMs).toISOString(),
       wallTimeSeconds: Math.round((endMs - startMs) / 1000),
       status: "failed",
-      phase: currentPhase,
+      phase: "cloud-runner",
       researchModel,
       draftModel,
       implementationModel,
-      estimatedUsageByModel: usageByModel,
-      estimatedPricingByModel: pricing,
-      estimatedTotalUsage: usageByModel ? sumUsage(usageByModel) : undefined,
       error: error instanceof Error ? error.message : String(error),
     });
-    if (!sandbox) await deleteAiGatewayKey(aiGatewayKey.id);
+    if (!runnerStarted) await deleteAiGatewayKey(aiGatewayKey.id);
     if (sandbox) console.error(`Sandbox left running for inspection: ${sandbox.name}`);
     throw error;
   }
