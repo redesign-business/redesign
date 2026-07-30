@@ -7,3 +7,4 @@ runs/
 .env*
 !.env.example
 log-relay/.dev.vars
+log-relay/.wrangler/
