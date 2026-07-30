@@ -11,18 +11,9 @@ loadEnv({ path: ".env.local", quiet: true });
 export type RedesignOptions = {
   site: string;
   slug?: string;
-  model?: string;
   timeoutMinutes?: number;
   keepSandbox?: boolean;
   agentId?: string;
-};
-
-export type HybridRedesignOptions = Omit<RedesignOptions, "model"> & {
-  researchModel?: string;
-  draftModel?: string;
-  designModel?: string;
-  implementationModel?: string;
-  buildModel?: string;
 };
 
 export type RedesignResult = {
@@ -75,7 +66,6 @@ type RunMetrics = RedesignResult & {
 
 const OPENCODE_BIN = "/home/vercel-sandbox/.opencode/node_modules/.bin/opencode";
 const WORKDIR = "/vercel/sandbox";
-const DEFAULT_MODEL = "deepseek/deepseek-v4-pro";
 const DEFAULT_RESEARCH_MODEL = "deepseek/deepseek-v4-pro";
 const DEFAULT_DRAFT_MODEL = "openai/gpt-5.6-sol";
 const DEFAULT_IMPLEMENTATION_MODEL = "deepseek/deepseek-v4-pro";
@@ -167,52 +157,8 @@ export function resolveAgentId(agentId: string | undefined) {
 
 function modelForContinue(previous: RunMetrics) {
   if (previous.phase === "draft" && typeof previous.draftModel === "string") return gatewayModelFromInput(previous.draftModel);
-  if (previous.phase === "design" && typeof previous.designModel === "string") return gatewayModelFromInput(previous.designModel);
   if (previous.phase === "implementation" && typeof previous.implementationModel === "string") return gatewayModelFromInput(previous.implementationModel);
-  if (typeof previous.buildModel === "string") return gatewayModelFromInput(previous.buildModel);
   return gatewayModelFromInput(typeof previous.implementationModel === "string" ? previous.implementationModel : previous.model);
-}
-
-export function buildPrompt(options: {
-  site: string;
-  slug: string;
-  repoUrl: string;
-  expectedRedesignUrl: string;
-}) {
-  return [
-    `redesign ${options.site}.`,
-    "",
-    "Use these local skill files in order:",
-    "1. .opencode/skills/nextjs-site-building/SKILL.md",
-    "2. .opencode/skills/refine-landing-page/SKILL.md",
-    "3. .opencode/skills/web-quality-audit/SKILL.md",
-    "",
-    `Project slug: ${options.slug}`,
-    `GitHub repo: ${options.repoUrl}`,
-    `Original URL: ${options.site}`,
-    `Preferred redesign URL: ${options.expectedRedesignUrl}`,
-    "",
-    "Task:",
-    "1) Scrape the URL for copy and images. Put copy in raw.md and images in an images directory.",
-    "2) Make a proof.md that directly copies and organizes all the business's demonstrated proof from raw.md. Examples of demonstrated proof are completed work, testimonials, awards, statistics, guarantees, credentials, press, partnerships, and anything the business has or has done that makes a potential customer trust them. Do not invent proof.",
-    "3) Build the site. Use the business's unique data to inspire the design. Typical structure: nav, hero, several proof sections, FAQ, final CTA, footer. No text-only sections except nav, banners, the bar below hero, and footer. Do not repeat images or other media. There is one CTA; use it everywhere.",
-    "4) Run the refine-landing-page pass.",
-    "5) Run the web-quality-audit pass.",
-    "6) Automated tests are out of scope for this pilot. Run only the basic production build needed to deploy.",
-    "7) Commit and push to main after each major phase, using this history:",
-    "   - after raw.md and images/: chore: capture source materials",
-    "   - after proof.md: docs: organize proof",
-    "   - after the first complete site: feat: build landing page",
-    "   - after the refine pass: fix: refine landing page",
-    "   - after the audit/build pass: chore: pass audit and build",
-    "   If a push fails, stop and fix Git auth before continuing.",
-    "8) Deploy intentionally exactly once with the Vercel CLI after the site is finished. Use the slug as the Vercel project name.",
-    `9) Add ${new URL(options.expectedRedesignUrl).host} to the ${options.slug} Vercel project, then alias the final deployment to ${options.expectedRedesignUrl} with the Vercel CLI. The final Redesign URL must be ${options.expectedRedesignUrl}, not a vercel.app URL.`,
-    "10) Never print secrets, tokens, full environment variables, credential helper output, or auth headers.",
-    "",
-    "You are done when you have a URL to the landing page.",
-    "At the very end, print a short final block with Original URL, Redesign URL, GitHub repo, and slug.",
-  ].join("\n");
 }
 
 export function buildResearchPrompt(options: {
@@ -588,9 +534,7 @@ export async function refreshUsage(metricsPath: string) {
     status?: string;
     researchModel?: string;
     draftModel?: string;
-    designModel?: string;
     implementationModel?: string;
-    buildModel?: string;
     aiGatewayKeyId?: string;
     aiGatewayKeyName: string;
     startedAt: string;
@@ -600,7 +544,7 @@ export async function refreshUsage(metricsPath: string) {
   if (!metrics.sandbox) throw new Error("Metrics file is missing sandbox");
 
   const sandbox = await Sandbox.get({ name: metrics.sandbox });
-  const models = [metrics.researchModel, metrics.draftModel, metrics.designModel, metrics.implementationModel, metrics.buildModel]
+  const models = [metrics.researchModel, metrics.draftModel, metrics.implementationModel]
     .filter((model): model is string => typeof model === "string");
   if (models.length) {
     const usageByModel = await estimateOpenCodeUsage(sandbox, [...new Set(models)]);
@@ -794,197 +738,6 @@ async function localSkillCopies() {
   })));
 }
 
-export async function runRedesign(options: RedesignOptions): Promise<RedesignResult> {
-  const originalUrl = normalizeHttpUrl(options.site);
-  const slug = normalizeSlug(options.slug ?? slugFromUrl(originalUrl));
-  const model = gatewayModelFromInput(options.model ?? DEFAULT_MODEL);
-  const opencodeModel = opencodeModelForGatewayModel(model);
-  const baseDomain = process.env.REDESIGN_BASE_DOMAIN ?? DEFAULT_BASE_DOMAIN;
-  const expectedRedesignUrl = `https://${slug}.${baseDomain}`;
-  const githubToken = process.env.GITHUB_TOKEN;
-  const vercelToken = process.env.VERCEL_TOKEN ?? "";
-  const startMs = Date.now();
-  const metricsPath = join(process.cwd(), "runs", `${new Date(startMs).toISOString().replace(/[:.]/g, "-")}-${slug}.json`);
-  const agentId = resolveAgentId(options.agentId);
-
-  if (!githubToken) throw new Error("Missing GITHUB_TOKEN");
-
-  const aiGatewayKey = await createAiGatewayKey(slug);
-  let sandbox: Sandbox | undefined;
-
-  try {
-    const repo = await createGithubRepo(slug);
-    sandbox = await Sandbox.create({
-      name: makeSandboxName(slug),
-      runtime: "node24",
-      source: { type: "git", url: repo.cloneUrl, username: "x-access-token", password: githubToken, depth: 1 },
-      timeout: (options.timeoutMinutes ?? 90) * 60 * 1000,
-      resources: { vcpus: 2 },
-      env: {
-        AI_GATEWAY_API_KEY: aiGatewayKey.key,
-        GITHUB_TOKEN: githubToken,
-        GIT_USERNAME: "x-access-token",
-        GIT_PASSWORD: githubToken,
-        GH_TOKEN: githubToken,
-        VERCEL_TOKEN: vercelToken,
-        VERCEL_TEAM_ID: process.env.VERCEL_TEAM_ID ?? "",
-        OPENCODE_DISABLE_AUTOUPDATE: "true",
-        OPENCODE_DISABLE_MODELS_FETCH: "true",
-      },
-      tags: { app: "redesign-hosted-2", slug },
-    });
-
-    const prompt = buildPrompt({ site: originalUrl, slug, repoUrl: repo.htmlUrl, expectedRedesignUrl });
-
-    await must(await sandbox.runCommand("npm", ["install", "--prefix", "/home/vercel-sandbox/.opencode", "opencode-ai@1.18.9"]), "OpenCode install");
-    await must(await sandbox.runCommand({
-      cmd: "bash",
-      args: ["-lc", [
-        "git config user.name redesign-hosted-2",
-        "git config user.email redesign-hosted-2@users.noreply.github.com",
-        "git config credential.helper '!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f'",
-        "git ls-remote origin HEAD >/dev/null",
-      ].join(" && ")],
-      env: { GITHUB_TOKEN: githubToken },
-    }), "git setup");
-
-    await must(await sandbox.runCommand("mkdir", [
-      "-p",
-      `${WORKDIR}/.opencode/skills/nextjs-site-building`,
-      `${WORKDIR}/.opencode/skills/refine-landing-page`,
-      `${WORKDIR}/.opencode/skills/web-quality-audit`,
-      "/home/vercel-sandbox/.config/opencode",
-    ]), "mkdir");
-    await sandbox.writeFiles([
-      ...(await localSkillCopies()),
-      {
-        path: "/home/vercel-sandbox/.config/opencode/opencode.json",
-        content: Buffer.from(JSON.stringify({
-          $schema: "https://opencode.ai/config.json",
-          enabled_providers: ["vercel"],
-          model: opencodeModel,
-          provider: {
-          vercel: {
-            npm: "@ai-sdk/gateway",
-            env: ["AI_GATEWAY_API_KEY"],
-            options: { apiKey: "{env:AI_GATEWAY_API_KEY}" },
-              models: { [model]: {} },
-          },
-          },
-        }, null, 2)),
-      },
-      {
-        path: "/tmp/redesign-prompt.md",
-        content: Buffer.from(prompt),
-      },
-    ]);
-
-    const command = await sandbox.runCommand({
-      cmd: OPENCODE_BIN,
-      args: ["run", "Follow the attached redesign prompt.", "--auto", "--dir", WORKDIR, "--title", `Redesign ${slug}`, "--model", opencodeModel, "--file", "/tmp/redesign-prompt.md"],
-      detached: true,
-    });
-
-    const result: RedesignResult = {
-      sandbox: sandbox.name,
-      command: command.cmdId,
-      slug,
-      originalUrl,
-      repoUrl: repo.htmlUrl,
-      expectedRedesignUrl,
-      model,
-      aiGatewayBudget: aiGatewayKey.budget,
-      metricsPath,
-      agentId,
-    };
-
-    await writeRunMetrics(metricsPath, {
-      ...result,
-      aiGatewayKeyId: aiGatewayKey.id,
-      aiGatewayKeyName: aiGatewayKey.name,
-      startedAt: new Date(startMs).toISOString(),
-      status: "running",
-    });
-
-    console.log(JSON.stringify(result, null, 2));
-
-    const { output, finished } = await streamUntilFinished(command, startMs);
-    if (finished.exitCode !== 0) {
-      const endMs = Date.now();
-      const usage = (await estimateOpenCodeUsage(sandbox, [model]))?.[0];
-      const pricing = usage ? await modelPricing(model) : undefined;
-      const usageTable = usage && pricing ? usageCostRows(usage, pricing) : undefined;
-      await writeRunMetrics(metricsPath, {
-        ...result,
-        aiGatewayKeyId: aiGatewayKey.id,
-        aiGatewayKeyName: aiGatewayKey.name,
-        startedAt: new Date(startMs).toISOString(),
-        endedAt: new Date(endMs).toISOString(),
-        wallTimeSeconds: Math.round((endMs - startMs) / 1000),
-        status: "failed",
-        exitCode: finished.exitCode,
-        outputTail: outputTail(output),
-        estimatedUsage: usage,
-        estimatedPricing: pricing,
-        estimatedUsageTable: usageTable,
-      });
-      process.exitCode = finished.exitCode ?? 1;
-      console.error(`\nRedesign failed with exit code ${finished.exitCode}. Sandbox left running for inspection: ${sandbox.name}`);
-      console.error(outputTail(output));
-      return result;
-    }
-
-    const redesignUrl = await aliasRedesignUrl(extractRedesignUrl(output), expectedRedesignUrl, slug);
-    const endMs = Date.now();
-    const wallTimeSeconds = Math.round((endMs - startMs) / 1000);
-    const usage = (await estimateOpenCodeUsage(sandbox, [model]))?.[0];
-    const pricing = usage ? await modelPricing(model) : undefined;
-    const usageTable = usage && pricing ? usageCostRows(usage, pricing) : undefined;
-    await writeRunMetrics(metricsPath, {
-      ...result,
-      aiGatewayKeyId: aiGatewayKey.id,
-      aiGatewayKeyName: aiGatewayKey.name,
-      startedAt: new Date(startMs).toISOString(),
-      endedAt: new Date(endMs).toISOString(),
-      wallTimeSeconds,
-      status: "succeeded",
-      redesignUrl,
-      estimatedUsage: usage,
-      estimatedPricing: pricing,
-      estimatedUsageTable: usageTable,
-      aiGatewayKeyDeletedAt: new Date().toISOString(),
-    });
-
-    if (options.keepSandbox) {
-      await sandbox.stop();
-    } else {
-      await sandbox.delete();
-    }
-
-    console.log(`\nOriginal URL: ${originalUrl}`);
-    console.log(`Redesign URL: ${redesignUrl}`);
-    console.log(`GitHub repo: ${repo.htmlUrl}`);
-    console.log(`Slug: ${slug}`);
-    console.log(`Wall time: ${wallTimeSeconds}s`);
-    if (usageTable && usage) {
-      console.log(formatUsageTable(usageTable));
-      console.log(`OpenCode sessions: ${usage.requestCount}`);
-      console.log(`Estimated total: ${money(usage.totalCost)}`);
-    } else {
-      console.log("Estimated usage: unavailable from OpenCode session data");
-    }
-    console.log(`AI Gateway budget: $${aiGatewayKey.budget}`);
-    console.log(`Metrics: ${metricsPath}`);
-
-    await deleteAiGatewayKey(aiGatewayKey.id);
-    return result;
-  } catch (error) {
-    if (!sandbox) await deleteAiGatewayKey(aiGatewayKey.id);
-    if (sandbox) console.error(`Sandbox left running for inspection: ${sandbox.name}`);
-    throw error;
-  }
-}
-
 export async function continueRedesign(previousMetricsPath: string, options: { agentId?: string } = {}): Promise<RedesignResult> {
   const previous = await readRunMetrics(previousMetricsPath);
   if (previous.status === "succeeded") {
@@ -1114,12 +867,12 @@ export async function continueRedesign(previousMetricsPath: string, options: { a
   }
 }
 
-export async function runHybridRedesign(options: HybridRedesignOptions): Promise<RedesignResult> {
+export async function runRedesign(options: RedesignOptions): Promise<RedesignResult> {
   const originalUrl = normalizeHttpUrl(options.site);
-  const slug = normalizeSlug(options.slug ?? `${slugFromUrl(originalUrl)}-deepseek-sol-deepseek`);
-  const researchModel = gatewayModelFromInput(options.researchModel ?? DEFAULT_RESEARCH_MODEL);
-  const draftModel = gatewayModelFromInput(options.draftModel ?? options.designModel ?? options.buildModel ?? DEFAULT_DRAFT_MODEL);
-  const implementationModel = gatewayModelFromInput(options.implementationModel ?? DEFAULT_IMPLEMENTATION_MODEL);
+  const slug = normalizeSlug(options.slug ?? slugFromUrl(originalUrl));
+  const researchModel = DEFAULT_RESEARCH_MODEL;
+  const draftModel = DEFAULT_DRAFT_MODEL;
+  const implementationModel = DEFAULT_IMPLEMENTATION_MODEL;
   const usageModels = [...new Set([researchModel, draftModel, implementationModel])];
   const baseDomain = process.env.REDESIGN_BASE_DOMAIN ?? DEFAULT_BASE_DOMAIN;
   const expectedRedesignUrl = `https://${slug}.${baseDomain}`;

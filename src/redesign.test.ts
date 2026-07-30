@@ -3,7 +3,6 @@ import {
   aliasHostForRedesignUrl,
   appendWithoutReplay,
   buildDraftPrompt,
-  buildPrompt,
   buildResearchPrompt,
   buildSitePrompt,
   extractRedesignUrl,
@@ -34,28 +33,6 @@ assert.throws(() => normalizeSlug("-"), /Invalid slug/);
 assert.equal(gatewayModelFromInput("deepseek/deepseek-v4-pro"), "deepseek/deepseek-v4-pro");
 assert.equal(gatewayModelFromInput("vercel/deepseek/deepseek-v4-pro"), "deepseek/deepseek-v4-pro");
 assert.equal(opencodeModelForGatewayModel("deepseek/deepseek-v4-pro"), "vercel/deepseek/deepseek-v4-pro");
-
-const prompt = buildPrompt({
-  site: "https://acme.test/",
-  slug: "acme",
-  repoUrl: "https://github.com/redesign-business/acme",
-  expectedRedesignUrl: "https://acme.redesign.business",
-});
-
-assert.match(prompt, /Scrape the URL for copy and images/);
-assert.match(prompt, /raw\.md/);
-assert.match(prompt, /proof\.md/);
-assert.match(prompt, /\.opencode\/skills\/nextjs-site-building\/SKILL\.md/);
-assert.match(prompt, /\.opencode\/skills\/refine-landing-page\/SKILL\.md/);
-assert.match(prompt, /\.opencode\/skills\/web-quality-audit\/SKILL\.md/);
-assert.match(prompt, /Automated tests are out of scope/);
-assert.match(prompt, /Deploy intentionally exactly once/);
-assert.match(prompt, /Commit and push to main after each major phase/);
-assert.match(prompt, /chore: capture source materials/);
-assert.match(prompt, /feat: build landing page/);
-assert.match(prompt, /Add acme\.redesign\.business to the acme Vercel project/);
-assert.match(prompt, /final Redesign URL must be https:\/\/acme\.redesign\.business/);
-assert.match(prompt, /Never print secrets/);
 
 const researchPrompt = buildResearchPrompt({
   site: "https://acme.test/",

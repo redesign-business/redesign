@@ -17,7 +17,7 @@ Fill in:
 - `VERCEL_TOKEN`: token the app uses to create a budgeted AI Gateway key for each job, and that OpenCode can use for the final intentional Vercel deploy.
 - `VERCEL_TEAM_ID`: recommended when the Gateway and deployments live under a Vercel team.
 
-Each job creates a fresh AI Gateway key with a default `$1` budget and deletes it when the job exits. The default OpenCode model is `vercel/deepseek-v4-pro`.
+Each job creates a fresh AI Gateway key with a default `$1` budget and deletes it when the job exits. The redesign flow is fixed: DeepSeek researches, Sol drafts the site, then DeepSeek refines, audits, and deploys.
 
 ## Start a Redesign
 
@@ -39,7 +39,7 @@ Override the slug when the website entity should not use the source domain:
 npm run redesign https://example-business.com -- --slug example-plumbing
 ```
 
-The command streams OpenCode output until the redesign is finished, then prints the original URL, redesign URL, GitHub repo, and slug. On success it deletes the sandbox.
+The command streams OpenCode output until the redesign is finished, then prints the original URL, redesign URL, GitHub repo, slug, wall time, and estimated model costs. On success it deletes the sandbox.
 
 ## Recovery
 

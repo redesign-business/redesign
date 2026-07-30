@@ -1,11 +1,10 @@
 import { spawn } from "node:child_process";
-import { cleanupSandbox, commandOutput, continueRedesign, parseArgs, readRequired, refreshUsage, runHybridRedesign, runRedesign } from "./redesign.js";
+import { cleanupSandbox, commandOutput, continueRedesign, parseArgs, readRequired, refreshUsage, runRedesign } from "./redesign.js";
 
 const [cmd = "help", ...rest] = process.argv.slice(2);
 const usage = [
   "Usage:",
-  "  npm run redesign <url> [--slug <slug>] [--model <model>] [--agent-id <id>] [--keep-sandbox]",
-  "  npm run hybrid <url> [--slug <slug>] [--research-model <model>] [--draft-model <model>] [--implementation-model <model>] [--agent-id <id>] [--keep-sandbox]",
+  "  npm run redesign <url> [--slug <slug>] [--agent-id <id>] [--keep-sandbox]",
   "  npm run continue -- --metrics <path> [--agent-id <id>]",
   "  npm run logs -- --sandbox <sandbox> --command <command>",
   "  npm run stop -- --sandbox <sandbox>",
@@ -20,45 +19,27 @@ if (cmd === "help" || rest.includes("--help")) {
 const { args, positional } = parseArgs(rest);
 const agentId = args.get("agent-id");
 
-if ((cmd === "redesign" || cmd === "start" || cmd === "hybrid" || cmd === "continue") && agentId && process.env.REDESIGN_AGENT_SUBPROCESS !== "1") {
-  const script = cmd === "start" ? "redesign" : cmd;
-  const child = spawn("npm", ["run", script, "--", ...rest], {
+if ((cmd === "redesign" || cmd === "continue") && agentId && process.env.REDESIGN_AGENT_SUBPROCESS !== "1") {
+  const child = spawn("npm", ["run", cmd, "--", ...rest], {
     cwd: process.cwd(),
     detached: true,
     env: { ...process.env, REDESIGN_AGENT_SUBPROCESS: "1" },
     stdio: "ignore",
   });
   child.unref();
-  console.log(`Subscribed ${script} job started.`);
+  console.log(`Subscribed ${cmd} job started.`);
   console.log(`Agent: ${agentId}`);
   process.exit(0);
 }
 
 try {
-  if (cmd === "redesign" || cmd === "start") {
+  if (cmd === "redesign") {
     const site = positional[0] ?? args.get("site");
     if (!site) throw new Error("Missing site URL");
 
     await runRedesign({
       site,
       slug: args.get("slug"),
-      model: args.get("model"),
-      keepSandbox: args.get("keep-sandbox") === "true",
-      agentId,
-      timeoutMinutes: args.has("timeout") ? Number(args.get("timeout")) : undefined,
-    });
-  } else if (cmd === "hybrid") {
-    const site = positional[0] ?? args.get("site");
-    if (!site) throw new Error("Missing site URL");
-
-    await runHybridRedesign({
-      site,
-      slug: args.get("slug"),
-      researchModel: args.get("research-model"),
-      draftModel: args.get("draft-model"),
-      designModel: args.get("design-model"),
-      implementationModel: args.get("implementation-model"),
-      buildModel: args.get("build-model"),
       keepSandbox: args.get("keep-sandbox") === "true",
       agentId,
       timeoutMinutes: args.has("timeout") ? Number(args.get("timeout")) : undefined,
