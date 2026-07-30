@@ -68,6 +68,7 @@ const DEFAULT_BASE_DOMAIN = "redesign.business";
 const DEFAULT_AI_GATEWAY_BUDGET = 1;
 const LOG_STREAM_IDLE_MS = 10_000;
 const LOG_RELAY_RECONNECT_MS = 500;
+const MAX_PHASE_CONTINUES = Number(process.env.REDESIGN_MAX_PHASE_CONTINUES ?? 5);
 
 const skillFiles = [
   "nextjs-site-building",
@@ -322,6 +323,46 @@ function opencodeCommand(args: string[], relay: LogRelay | undefined, phase: str
     detached: true,
     env: Object.keys(commandEnv).length ? commandEnv : undefined,
   };
+}
+
+export function isBudgetFailureOutput(output: string) {
+  return /budget|quota|limit|insufficient funds|payment required/i.test(output);
+}
+
+async function runOpenCodePhase(options: {
+  sandbox: Sandbox;
+  args: string[];
+  relay?: LogRelay;
+  phase: string;
+  model: string;
+  startMs: number;
+  onCommand?: (command: Command, attempts: string[]) => Promise<void>;
+}) {
+  const attempts: string[] = [];
+  let output = "";
+  let args = options.args;
+
+  for (let retry = 0; retry <= MAX_PHASE_CONTINUES; retry += 1) {
+    if (retry > 0) {
+      console.error(`\n${options.phase} exited before completion; retrying with OpenCode continue (${retry}/${MAX_PHASE_CONTINUES}).`);
+      args = ["run", "continue", "--continue", "--auto", "--dir", WORKDIR, "--model", opencodeModelForGatewayModel(options.model)];
+    }
+
+    const command = await options.sandbox.runCommand(opencodeCommand(args, options.relay, options.phase));
+    attempts.push(command.cmdId);
+    await options.onCommand?.(command, attempts);
+
+    const run = await streamUntilFinished(command, options.startMs, options.relay);
+    output += run.output;
+    if (run.finished.exitCode === 0) {
+      return { command, output, attempts };
+    }
+    if (isBudgetFailureOutput(run.output)) {
+      throw new Error(`${options.phase} phase failed with budget/quota error\n${outputTail(run.output)}`);
+    }
+  }
+
+  throw new Error(`${options.phase} phase failed after ${MAX_PHASE_CONTINUES} continue attempts\n${outputTail(output)}`);
 }
 
 function openRelayReader(relay: LogRelay) {
@@ -1012,6 +1053,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
 
   const aiGatewayKey = await createAiGatewayKey(slug);
   let sandbox: Sandbox | undefined;
+  let currentPhase: "research" | "draft" | "implementation" | undefined;
 
   const result: RedesignResult = {
     sandbox: "",
@@ -1126,16 +1168,31 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
 
     console.log(JSON.stringify(result, null, 2));
 
-    const research = await sandbox.runCommand(opencodeCommand(
-      ["run", "Follow the attached redesign prompt.", "--auto", "--dir", WORKDIR, "--title", `Research ${slug}`, "--model", opencodeModelForGatewayModel(researchModel), "--file", "/tmp/research-prompt.md"],
+    currentPhase = "research";
+    const researchRun = await runOpenCodePhase({
+      sandbox,
       relay,
-      "research",
-    ));
-    result.command = research.cmdId;
-    const researchRun = await streamUntilFinished(research, startMs, relay);
-    if (researchRun.finished.exitCode !== 0) {
-      throw new Error(`Research phase failed with exit code ${researchRun.finished.exitCode}\n${outputTail(researchRun.output)}`);
-    }
+      phase: "research",
+      model: researchModel,
+      startMs,
+      args: ["run", "Follow the attached redesign prompt.", "--auto", "--dir", WORKDIR, "--title", `Research ${slug}`, "--model", opencodeModelForGatewayModel(researchModel), "--file", "/tmp/research-prompt.md"],
+      onCommand: async (command, attempts) => {
+        result.command = command.cmdId;
+        await writeRunMetrics(metricsPath, {
+          ...result,
+          aiGatewayKeyId: aiGatewayKey.id,
+          aiGatewayKeyName: aiGatewayKey.name,
+          startedAt: new Date(startMs).toISOString(),
+          status: "running",
+          phase: "research",
+          researchModel,
+          draftModel,
+          implementationModel,
+          researchCommand: command.cmdId,
+          researchAttempts: attempts,
+        });
+      },
+    });
 
     await writeRunMetrics(metricsPath, {
       ...result,
@@ -1147,19 +1204,37 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       researchModel,
       draftModel,
       implementationModel,
-      researchCommand: research.cmdId,
+      researchCommand: researchRun.command.cmdId,
+      researchAttempts: researchRun.attempts,
     });
 
-    const draft = await sandbox.runCommand(opencodeCommand(
-      ["run", "git pull --ff-only && follow the attached first-draft prompt.", "--auto", "--dir", WORKDIR, "--title", `Draft ${slug}`, "--model", opencodeModelForGatewayModel(draftModel), "--file", "/tmp/draft-prompt.md"],
+    currentPhase = "draft";
+    const draftRun = await runOpenCodePhase({
+      sandbox,
       relay,
-      "draft",
-    ));
-    result.command = draft.cmdId;
-    const draftRun = await streamUntilFinished(draft, startMs, relay);
-    if (draftRun.finished.exitCode !== 0) {
-      throw new Error(`Draft phase failed with exit code ${draftRun.finished.exitCode}\n${outputTail(draftRun.output)}`);
-    }
+      phase: "draft",
+      model: draftModel,
+      startMs,
+      args: ["run", "git pull --ff-only && follow the attached first-draft prompt.", "--auto", "--dir", WORKDIR, "--title", `Draft ${slug}`, "--model", opencodeModelForGatewayModel(draftModel), "--file", "/tmp/draft-prompt.md"],
+      onCommand: async (command, attempts) => {
+        result.command = command.cmdId;
+        await writeRunMetrics(metricsPath, {
+          ...result,
+          aiGatewayKeyId: aiGatewayKey.id,
+          aiGatewayKeyName: aiGatewayKey.name,
+          startedAt: new Date(startMs).toISOString(),
+          status: "running",
+          phase: "draft",
+          researchModel,
+          draftModel,
+          implementationModel,
+          researchCommand: researchRun.command.cmdId,
+          researchAttempts: researchRun.attempts,
+          draftCommand: command.cmdId,
+          draftAttempts: attempts,
+        });
+      },
+    });
 
     await writeRunMetrics(metricsPath, {
       ...result,
@@ -1171,20 +1246,41 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       researchModel,
       draftModel,
       implementationModel,
-      researchCommand: research.cmdId,
-      draftCommand: draft.cmdId,
+      researchCommand: researchRun.command.cmdId,
+      researchAttempts: researchRun.attempts,
+      draftCommand: draftRun.command.cmdId,
+      draftAttempts: draftRun.attempts,
     });
 
-    const build = await sandbox.runCommand(opencodeCommand(
-      ["run", "git pull --ff-only && follow the attached implementation prompt.", "--auto", "--dir", WORKDIR, "--title", `Implement ${slug}`, "--model", opencodeModelForGatewayModel(implementationModel), "--file", "/tmp/site-prompt.md"],
+    currentPhase = "implementation";
+    const buildRun = await runOpenCodePhase({
+      sandbox,
       relay,
-      "implementation",
-    ));
-    result.command = build.cmdId;
-    const buildRun = await streamUntilFinished(build, startMs, relay);
-    if (buildRun.finished.exitCode !== 0) {
-      throw new Error(`Implementation phase failed with exit code ${buildRun.finished.exitCode}\n${outputTail(buildRun.output)}`);
-    }
+      phase: "implementation",
+      model: implementationModel,
+      startMs,
+      args: ["run", "git pull --ff-only && follow the attached implementation prompt.", "--auto", "--dir", WORKDIR, "--title", `Implement ${slug}`, "--model", opencodeModelForGatewayModel(implementationModel), "--file", "/tmp/site-prompt.md"],
+      onCommand: async (command, attempts) => {
+        result.command = command.cmdId;
+        await writeRunMetrics(metricsPath, {
+          ...result,
+          aiGatewayKeyId: aiGatewayKey.id,
+          aiGatewayKeyName: aiGatewayKey.name,
+          startedAt: new Date(startMs).toISOString(),
+          status: "running",
+          phase: "implementation",
+          researchModel,
+          draftModel,
+          implementationModel,
+          researchCommand: researchRun.command.cmdId,
+          researchAttempts: researchRun.attempts,
+          draftCommand: draftRun.command.cmdId,
+          draftAttempts: draftRun.attempts,
+          implementationCommand: command.cmdId,
+          implementationAttempts: attempts,
+        });
+      },
+    });
 
     const redesignUrl = await aliasRedesignUrl(extractRedesignUrl(buildRun.output), expectedRedesignUrl, slug);
     const endMs = Date.now();
@@ -1205,9 +1301,12 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       researchModel,
       draftModel,
       implementationModel,
-      researchCommand: research.cmdId,
-      draftCommand: draft.cmdId,
-      implementationCommand: build.cmdId,
+      researchCommand: researchRun.command.cmdId,
+      researchAttempts: researchRun.attempts,
+      draftCommand: draftRun.command.cmdId,
+      draftAttempts: draftRun.attempts,
+      implementationCommand: buildRun.command.cmdId,
+      implementationAttempts: buildRun.attempts,
       estimatedUsageByModel: usageByModel,
       estimatedPricingByModel: pricing,
       estimatedTotalUsage: totalUsage,
@@ -1251,6 +1350,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       endedAt: new Date(endMs).toISOString(),
       wallTimeSeconds: Math.round((endMs - startMs) / 1000),
       status: "failed",
+      phase: currentPhase,
       researchModel,
       draftModel,
       implementationModel,

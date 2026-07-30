@@ -7,6 +7,7 @@ import {
   buildSitePrompt,
   extractRedesignUrl,
   gatewayModelFromInput,
+  isBudgetFailureOutput,
   normalizeHttpUrl,
   normalizeSlug,
   opencodeModelForGatewayModel,
@@ -29,6 +30,8 @@ assert.throws(() => normalizeSlug("-"), /Invalid slug/);
 assert.equal(gatewayModelFromInput("deepseek/deepseek-v4-pro"), "deepseek/deepseek-v4-pro");
 assert.equal(gatewayModelFromInput("vercel/deepseek/deepseek-v4-pro"), "deepseek/deepseek-v4-pro");
 assert.equal(opencodeModelForGatewayModel("deepseek/deepseek-v4-pro"), "vercel/deepseek/deepseek-v4-pro");
+assert.equal(isBudgetFailureOutput("AI Gateway quota limit exceeded"), true);
+assert.equal(isBudgetFailureOutput("process exited before running build"), false);
 
 const researchPrompt = buildResearchPrompt({
   site: "https://acme.test/",
