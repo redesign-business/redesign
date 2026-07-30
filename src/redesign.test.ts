@@ -3,8 +3,8 @@ import {
   aliasHostForRedesignUrl,
   appendWithoutReplay,
   buildDraftPrompt,
+  buildRepairPrompt,
   buildResearchPrompt,
-  buildSitePrompt,
   extractRedesignUrl,
   gatewayModelFromInput,
   isBudgetFailureOutput,
@@ -54,17 +54,11 @@ assert.match(draftPrompt, /public\/images\/manifest\.json/);
 assert.match(draftPrompt, /Build the site in page\.tsx/);
 assert.match(draftPrompt, /Don't build, commit, or push/);
 
-const sitePrompt = buildSitePrompt({
-  site: "https://acme.test/",
-  slug: "acme",
-  repoUrl: "https://github.com/redesign-business/acme",
-  expectedRedesignUrl: "https://acme.redesign.business",
-});
-assert.match(sitePrompt, /Deploy the existing first-draft website/);
-assert.match(sitePrompt, /Run production build/);
-assert.match(sitePrompt, /feat: build landing page/);
-assert.doesNotMatch(sitePrompt, /nextjs-site-building/);
-assert.match(sitePrompt, /You are done when you have a URL to the landing page/);
+const repairPrompt = buildRepairPrompt("Type error: nope");
+assert.match(repairPrompt, /Fix the exact production build error/);
+assert.match(repairPrompt, /Type error: nope/);
+assert.match(repairPrompt, /Do not commit, push, deploy/);
+assert.doesNotMatch(repairPrompt, /nextjs-site-building/);
 
 assert.equal(extractRedesignUrl("Original URL: https://old.test\nRedesign URL: https://new.test"), "https://new.test");
 assert.equal(extractRedesignUrl("nothing here"), undefined);

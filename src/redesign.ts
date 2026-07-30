@@ -64,11 +64,13 @@ const DEFAULT_RESEARCH_MODEL = "deepseek/deepseek-v4-pro";
 const DEFAULT_DRAFT_MODEL = "openai/gpt-5.6-sol";
 const DEFAULT_IMPLEMENTATION_MODEL = "deepseek/deepseek-v4-pro";
 const DEFAULT_GITHUB_OWNER = "redesign-business";
+const DEFAULT_TEMPLATE_REPO = "https://github.com/redesign-business/template.git";
 const DEFAULT_BASE_DOMAIN = "redesign.business";
 const DEFAULT_AI_GATEWAY_BUDGET = 1;
 const LOG_STREAM_IDLE_MS = 10_000;
 const LOG_RELAY_RECONNECT_MS = 500;
 const MAX_PHASE_CONTINUES = Number(process.env.REDESIGN_MAX_PHASE_CONTINUES ?? 5);
+const MAX_BUILD_REPAIRS = Number(process.env.REDESIGN_MAX_BUILD_REPAIRS ?? 5);
 
 const skillFiles = [
   "nextjs-site-building",
@@ -199,27 +201,17 @@ export function buildDraftPrompt(options: {
   ].join("\n");
 }
 
-export function buildSitePrompt(options: {
-  site: string;
-  slug: string;
-  repoUrl: string;
-  expectedRedesignUrl: string;
-}) {
+export function buildRepairPrompt(buildOutput: string) {
   return [
-    "Deploy the existing first-draft website.",
+    "Fix the exact production build error below.",
     "",
-    `Project slug: ${options.slug}`,
-    `GitHub repo: ${options.repoUrl}`,
-    `Original URL: ${options.site}`,
-    `Expected redesign URL: ${options.expectedRedesignUrl}`,
+    "Rules:",
+    "Only change files required to make the build pass.",
+    "Keep the current design intact.",
+    "Do not commit, push, deploy, or redesign the page.",
     "",
-    "Task:",
-    "Run production build needed to prove the draft compiles.",
-    "Commit and push the first complete site to main with: feat: build landing page",
-    "Deploy intentionally exactly once with the Vercel CLI after the site is finished. Use the slug as the Vercel project name.",
-    `Add ${new URL(options.expectedRedesignUrl).host} to the ${options.slug} Vercel project, then alias the final deployment to ${options.expectedRedesignUrl} with the Vercel CLI. The final Redesign URL must be ${options.expectedRedesignUrl}, not a vercel.app URL.`,
-    "",
-    "You are done when you have a URL to the landing page.",
+    "Build output:",
+    buildOutput,
   ].join("\n");
 }
 
@@ -904,6 +896,112 @@ async function commitResearchInputs(sandbox: Sandbox) {
   }), "research input commit");
 }
 
+async function runSandboxShell(sandbox: Sandbox, label: string, script: string, startMs: number, env?: Record<string, string>) {
+  const command = await sandbox.runCommand({
+    cmd: "bash",
+    args: ["-lc", script],
+    env,
+  });
+  const run = await streamUntilFinished(command, startMs);
+  if (run.finished.exitCode !== 0) {
+    throw new Error(`${label} failed\n${outputTail(run.output)}`);
+  }
+  return { command, output: run.output };
+}
+
+async function runSandboxShellAttempt(sandbox: Sandbox, script: string, startMs: number, env?: Record<string, string>) {
+  const command = await sandbox.runCommand({
+    cmd: "bash",
+    args: ["-lc", script],
+    env,
+  });
+  const run = await streamUntilFinished(command, startMs);
+  return { command, output: run.output, exitCode: run.finished.exitCode };
+}
+
+async function seedTemplate(sandbox: Sandbox, startMs: number) {
+  await runSandboxShell(sandbox, "template seed", [
+    "tmp=$(mktemp -d)",
+    `git clone --depth 1 ${DEFAULT_TEMPLATE_REPO} "$tmp"`,
+    "shopt -s dotglob",
+    "for item in \"$tmp\"/*; do",
+    "  [ \"$(basename \"$item\")\" = .git ] && continue",
+    "  cp -a \"$item\" .",
+    "done",
+    "rm -rf \"$tmp\"",
+    "git add -A",
+    "git commit -m 'chore: seed nextjs template' || true",
+    "git push",
+  ].join("\n"), startMs);
+}
+
+async function buildWithRepairs(options: {
+  sandbox: Sandbox;
+  relay?: LogRelay;
+  model: string;
+  startMs: number;
+}) {
+  await runSandboxShell(options.sandbox, "dependency install", "corepack enable && pnpm install --frozen-lockfile", options.startMs);
+
+  const builds: string[] = [];
+  const repairs: string[] = [];
+  for (let attempt = 0; attempt <= MAX_BUILD_REPAIRS; attempt += 1) {
+    const build = await runSandboxShellAttempt(options.sandbox, "pnpm build", options.startMs);
+    builds.push(build.command.cmdId);
+    if (build.exitCode === 0) return { builds, repairs };
+    if (attempt === MAX_BUILD_REPAIRS) throw new Error(`build failed after ${MAX_BUILD_REPAIRS} repairs\n${outputTail(build.output)}`);
+
+    await options.sandbox.writeFiles([{
+      path: "/tmp/build-repair-prompt.md",
+      content: Buffer.from(buildRepairPrompt(outputTail(build.output, 12_000))),
+    }]);
+    const repair = await runOpenCodePhase({
+      sandbox: options.sandbox,
+      relay: options.relay,
+      phase: "build-repair",
+      model: options.model,
+      startMs: options.startMs,
+      args: ["run", "Follow the attached build repair prompt.", "--auto", "--dir", WORKDIR, "--title", "Build repair", "--model", opencodeModelForGatewayModel(options.model), "--file", "/tmp/build-repair-prompt.md"],
+    });
+    repairs.push(...repair.attempts);
+  }
+
+  return { builds, repairs };
+}
+
+async function commitAndPushSite(sandbox: Sandbox, startMs: number) {
+  await runSandboxShell(sandbox, "site commit", [
+    "git add -A",
+    "git commit -m 'feat: build landing page' || true",
+    "git push",
+  ].join("\n"), startMs);
+}
+
+async function deployFromSandbox(sandbox: Sandbox, expectedRedesignUrl: string, slug: string, startMs: number) {
+  const host = new URL(expectedRedesignUrl).host;
+  const { output, command } = await runSandboxShell(sandbox, "Vercel deploy", [
+    "set -euo pipefail",
+    "scope=()",
+    "team=()",
+    "if [ -n \"${VERCEL_TEAM_ID:-}\" ]; then scope=(--scope \"$VERCEL_TEAM_ID\"); fi",
+    "if [ -n \"${VERCEL_TEAM_ID:-}\" ]; then team=(--team \"$VERCEL_TEAM_ID\"); fi",
+    "npx --yes vercel link --yes --project \"$REDESIGN_SLUG\" \"${team[@]}\"",
+    "npx --yes vercel deploy --yes \"${scope[@]}\" | tee /tmp/vercel-deploy.out",
+    "deployment_url=$(grep -Eo 'https://[^[:space:]]+\\.vercel\\.app[^[:space:]]*' /tmp/vercel-deploy.out | tail -n 1)",
+    "[ -n \"$deployment_url\" ]",
+    "echo \"Deployment URL: $deployment_url\"",
+    "npx --yes vercel domains add \"$REDESIGN_HOST\" \"$REDESIGN_SLUG\" --force \"${scope[@]}\" || true",
+    "npx --yes vercel alias set \"$deployment_url\" \"$REDESIGN_HOST\" \"${scope[@]}\"",
+    "echo \"Redesign URL: https://$REDESIGN_HOST\"",
+  ].join("\n"), startMs, {
+    REDESIGN_SLUG: slug,
+    REDESIGN_HOST: host,
+    VERCEL_TOKEN: process.env.VERCEL_TOKEN ?? "",
+    VERCEL_TEAM_ID: process.env.VERCEL_TEAM_ID ?? "",
+  });
+  return { redesignUrl: extractRedesignUrl(output) ?? expectedRedesignUrl, command: command.cmdId };
+}
+
 export async function continueRedesign(previousMetricsPath: string): Promise<RedesignResult> {
   const previous = await readRunMetrics(previousMetricsPath);
   if (previous.status === "succeeded") {
@@ -1053,7 +1151,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
 
   const aiGatewayKey = await createAiGatewayKey(slug);
   let sandbox: Sandbox | undefined;
-  let currentPhase: "research" | "draft" | "implementation" | undefined;
+  let currentPhase: "research" | "draft" | "build" | "deploy" | undefined;
 
   const result: RedesignResult = {
     sandbox: "",
@@ -1109,6 +1207,8 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       env: { GITHUB_TOKEN: githubToken },
     }), "git setup");
 
+    await seedTemplate(sandbox, startMs);
+
     await must(await sandbox.runCommand("mkdir", [
       "-p",
       `${WORKDIR}/.opencode/skills/nextjs-site-building`,
@@ -1146,10 +1246,6 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       {
         path: "/tmp/draft-prompt.md",
         content: Buffer.from(buildDraftPrompt({ site: originalUrl, slug, repoUrl: repo.htmlUrl })),
-      },
-      {
-        path: "/tmp/site-prompt.md",
-        content: Buffer.from(buildSitePrompt({ site: originalUrl, slug, repoUrl: repo.htmlUrl, expectedRedesignUrl })),
       },
     ]);
     await commitResearchInputs(sandbox);
@@ -1242,7 +1338,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       aiGatewayKeyName: aiGatewayKey.name,
       startedAt: new Date(startMs).toISOString(),
       status: "running",
-      phase: "implementation",
+      phase: "build",
       researchModel,
       draftModel,
       implementationModel,
@@ -1252,37 +1348,36 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       draftAttempts: draftRun.attempts,
     });
 
-    currentPhase = "implementation";
-    const buildRun = await runOpenCodePhase({
+    currentPhase = "build";
+    const buildRun = await buildWithRepairs({
       sandbox,
       relay,
-      phase: "implementation",
       model: implementationModel,
       startMs,
-      args: ["run", "git pull --ff-only && follow the attached implementation prompt.", "--auto", "--dir", WORKDIR, "--title", `Implement ${slug}`, "--model", opencodeModelForGatewayModel(implementationModel), "--file", "/tmp/site-prompt.md"],
-      onCommand: async (command, attempts) => {
-        result.command = command.cmdId;
-        await writeRunMetrics(metricsPath, {
-          ...result,
-          aiGatewayKeyId: aiGatewayKey.id,
-          aiGatewayKeyName: aiGatewayKey.name,
-          startedAt: new Date(startMs).toISOString(),
-          status: "running",
-          phase: "implementation",
-          researchModel,
-          draftModel,
-          implementationModel,
-          researchCommand: researchRun.command.cmdId,
-          researchAttempts: researchRun.attempts,
-          draftCommand: draftRun.command.cmdId,
-          draftAttempts: draftRun.attempts,
-          implementationCommand: command.cmdId,
-          implementationAttempts: attempts,
-        });
-      },
     });
 
-    const redesignUrl = await aliasRedesignUrl(extractRedesignUrl(buildRun.output), expectedRedesignUrl, slug);
+    await writeRunMetrics(metricsPath, {
+      ...result,
+      aiGatewayKeyId: aiGatewayKey.id,
+      aiGatewayKeyName: aiGatewayKey.name,
+      startedAt: new Date(startMs).toISOString(),
+      status: "running",
+      phase: "deploy",
+      researchModel,
+      draftModel,
+      implementationModel,
+      researchCommand: researchRun.command.cmdId,
+      researchAttempts: researchRun.attempts,
+      draftCommand: draftRun.command.cmdId,
+      draftAttempts: draftRun.attempts,
+      buildCommands: buildRun.builds,
+      repairCommands: buildRun.repairs,
+    });
+
+    currentPhase = "deploy";
+    await commitAndPushSite(sandbox, startMs);
+    const deployRun = await deployFromSandbox(sandbox, expectedRedesignUrl, slug, startMs);
+    const redesignUrl = deployRun.redesignUrl;
     const endMs = Date.now();
     const wallTimeSeconds = Math.round((endMs - startMs) / 1000);
     const usageByModel = await estimateOpenCodeUsage(sandbox, usageModels);
@@ -1305,8 +1400,9 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       researchAttempts: researchRun.attempts,
       draftCommand: draftRun.command.cmdId,
       draftAttempts: draftRun.attempts,
-      implementationCommand: buildRun.command.cmdId,
-      implementationAttempts: buildRun.attempts,
+      buildCommands: buildRun.builds,
+      repairCommands: buildRun.repairs,
+      deployCommand: deployRun.command,
       estimatedUsageByModel: usageByModel,
       estimatedPricingByModel: pricing,
       estimatedTotalUsage: totalUsage,
