@@ -7,10 +7,11 @@
     "redesign": "tsx src/cli.ts redesign",
     "attach": "tsx src/cli.ts attach",
     "stop": "tsx src/cli.ts stop",
-    "test": "tsx src/redesign.test.ts",
+    "test": "tsx src/redesign.test.ts && tsx src/db.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
     "@vercel/sandbox": "^2.9.0",
     "cheerio": "^1.2.0",
     "dotenv": "^17.2.3",

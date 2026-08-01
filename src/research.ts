@@ -30,17 +30,7 @@ type ImageData = {
   bytes: number;
 };
 
-type ImageCandidate = {
-  pageUrl: string;
-  pageTitle?: string;
-  sourceUrl: string;
-  alt?: string;
-  title?: string;
-  nearestHeading?: string;
-  context?: string;
-  linkHref?: string;
-  linkText?: string;
-};
+type ImageCandidate = Omit<ImageData, "localPath" | "contentType" | "bytes">;
 
 const maxPages = Number(process.env.REDESIGN_RESEARCH_MAX_PAGES ?? 40);
 const maxImagesPerPage = Number(process.env.REDESIGN_RESEARCH_MAX_IMAGES_PER_PAGE ?? 40);
@@ -104,7 +94,7 @@ export function normalizeSameDomainUrl(value: string, baseUrl: string, origin: s
     if (url.origin !== origin) return undefined;
     if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
     url.hash = "";
-    if (/\.(avif|css|gif|ico|jpe?g|js|json|pdf|png|svg|webp|xml|zip)$/i.test(url.pathname)) return undefined;
+    if (!isDocumentUrl(url)) return undefined;
     return url.toString();
   } catch {
     return undefined;
@@ -163,7 +153,7 @@ function sameDomainLinks($: cheerio.CheerioAPI, pageUrl: string, origin: string)
     .filter((url): url is string => Boolean(url)))];
 }
 
-function imageUrls($: cheerio.CheerioAPI, pageUrl: string, pageTitle?: string): ImageCandidate[] {
+function imageUrls($: cheerio.CheerioAPI, pageUrl: string, pageTitle: string | undefined): ImageCandidate[] {
   const images: ImageCandidate[] = [];
 
   $("img").each((_, element) => {
@@ -248,6 +238,10 @@ function absoluteUrl(value: string | undefined, baseUrl: string) {
   }
 }
 
+function isDocumentUrl(url: URL) {
+  return !/\.(avif|css|gif|ico|jpe?g|js|json|pdf|png|svg|webp|xml|zip)$/i.test(url.pathname);
+}
+
 function textAttr($: cheerio.CheerioAPI, element: Element, attr: string) {
   return $(element).attr(attr)?.replace(/\s+/g, " ").trim() || undefined;
 }
@@ -321,7 +315,7 @@ function extensionForContentType(contentType: string) {
 
 function rawMarkdown(site: string, pages: PageData[], images: ImageData[]) {
   return [
-    `# Raw site scrape`,
+    "# Raw site scrape",
     "",
     `Source URL: ${site}`,
     `Fetched pages: ${pages.length}`,

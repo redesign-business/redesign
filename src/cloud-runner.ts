@@ -1,13 +1,18 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+import { replaceRunSessions, updateRunData } from "./db.js";
 import { collectResearchFiles } from "./research.js";
 
 type Usage = {
   model?: string;
   totalCost: number;
   marketCost: number;
+  inputCost: number;
+  outputCost: number;
+  cacheReadCost: number;
+  cacheWriteCost: number;
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
@@ -47,6 +52,7 @@ const originalUrl = required("REDESIGN_SITE");
 const repoUrl = required("REDESIGN_REPO_URL");
 const expectedRedesignUrl = required("REDESIGN_EXPECTED_URL");
 const startedAt = required("REDESIGN_STARTED_AT");
+const runId = required("REDESIGN_RUN_ID");
 const aiGatewayKeyId = required("AI_GATEWAY_KEY_ID");
 const aiGatewayKeyName = required("AI_GATEWAY_KEY_NAME");
 const aiGatewayBudget = Number(required("AI_GATEWAY_BUDGET"));
@@ -71,8 +77,8 @@ function buildResearchPrompt() {
     `GitHub repo: ${repoUrl}`,
     `Original URL: ${originalUrl}`,
     "",
-    "raw.md already contains a simple crawl of same-domain pages converted from HTML to Markdown.",
-    "public/images/manifest.json lists downloaded images with page and section context.",
+    "raw.md already contains crawled same-domain pages from the original website converted from HTML to Markdown.",
+    "public/images/manifest.json lists downloaded images with source URL, page, and context.",
     "",
     "Make proof.md directly copy and organize all the business's demonstrated proof from raw.md. Examples of demonstrated proof are completed work, testimonials, awards, statistics, guarantees, credentials, press, partnerships, and anything the business has or has done that makes a potential customer trust them. Do not invent proof.",
     "",
@@ -90,7 +96,7 @@ function buildDraftPrompt() {
     "",
     "Task:",
     "Build the site in app/page.tsx. Use the business's unique proof to inspire the design.",
-    "Use image localPath values from public/images/manifest.json. Use the page title, nearest heading, surrounding context, filename, and source page to infer what each image was doing on the original site.",
+    "Use image localPath values from public/images/manifest.json. Use page title, nearest heading, surrounding context, filename, and source page to infer what each image was doing on the original site.",
     "Typical structure: nav, hero, several proof sections, FAQ, final CTA, footer.",
     "No text-only sections except nav, banners, the bar below hero, and footer. Do not repeat images or other media.",
     "There is one CTA; use it everywhere.",
@@ -193,29 +199,11 @@ async function write(path: string, content: string | Buffer) {
 }
 
 async function updateRun(fields: Record<string, unknown>) {
-  const path = join(WORKDIR, "redesign-run.json");
-  let previous = {};
-  try {
-    previous = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
-  } catch {
-    // First write.
-  }
-  const next = { ...previous, ...fields };
-  await write(path, `${JSON.stringify(next, null, 2)}\n`);
-  await sh([
-    "git add redesign-run.json",
-    "git commit -m 'chore: update redesign run status' || true",
-    "git push",
-  ].join("\n"));
+  await updateRunData(runId, fields);
 }
 
 async function resetRun(fields: Record<string, unknown>) {
-  await write(join(WORKDIR, "redesign-run.json"), `${JSON.stringify(fields, null, 2)}\n`);
-  await sh([
-    "git add redesign-run.json",
-    "git commit -m 'chore: update redesign run status' || true",
-    "git push",
-  ].join("\n"));
+  await updateRun(fields);
 }
 
 async function commitAll(message: string) {
@@ -303,7 +291,7 @@ async function runOpenCodePhase(phase: string, model: string, args: string[], op
     }
     const id = `${phase}-${randomUUID().slice(0, 8)}`;
     attempts.push(id);
-    await updateRun({ phase, [`${phase}Attempts`]: attempts });
+    await updateRun({ status: phase, [`${phase}Attempts`]: attempts });
 
     const result = await run(OPENCODE_BIN, currentArgs, { cwd: WORKDIR, allowFailure: true, interactive: true });
     output += result.output;
@@ -321,7 +309,7 @@ async function buildWithRepairs() {
   for (let attempt = 0; attempt <= MAX_BUILD_REPAIRS; attempt += 1) {
     const build = await sh("pnpm build", { allowFailure: true });
     builds.push(`build-${attempt + 1}`);
-    await updateRun({ phase: "build", buildCommands: builds, repairCommands: repairs });
+    await updateRun({ status: "build", buildCommands: builds, repairCommands: repairs });
     if (build.exitCode === 0) return { builds, repairs };
     if (attempt === MAX_BUILD_REPAIRS) throw new Error(`build failed after ${MAX_BUILD_REPAIRS} repairs\n${outputTail(build.output)}`);
 
@@ -343,10 +331,14 @@ async function deploy() {
     "set -euo pipefail",
     "scope=()",
     "team=()",
+    "build_env=()",
     "if [ -n \"${VERCEL_TEAM_ID:-}\" ]; then scope=(--scope \"$VERCEL_TEAM_ID\"); fi",
     "if [ -n \"${VERCEL_TEAM_ID:-}\" ]; then team=(--team \"$VERCEL_TEAM_ID\"); fi",
+    "for name in NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN NEXT_PUBLIC_POSTHOG_HOST NEXT_PUBLIC_REDESIGN_SLUG; do",
+    "  if [ -n \"${!name:-}\" ]; then build_env+=(--build-env \"$name=${!name}\"); fi",
+    "done",
     "npx --yes vercel link --yes --project \"$REDESIGN_SLUG\" \"${team[@]}\"",
-    "npx --yes vercel deploy --yes --no-wait \"${scope[@]}\" | tee /tmp/vercel-deploy.out",
+    "npx --yes vercel deploy --yes --no-wait \"${scope[@]}\" \"${build_env[@]}\" | tee /tmp/vercel-deploy.out",
     "deployment_url=$(grep -Eo 'https://[^[:space:]]+\\.vercel\\.app[^[:space:]]*' /tmp/vercel-deploy.out | tail -n 1)",
     "[ -n \"$deployment_url\" ]",
     "echo \"Deployment URL: $deployment_url\"",
@@ -435,12 +427,12 @@ async function estimateUsage() {
       reasoningTokens: row.reasoning_tokens ?? 0,
       requestCount: row.request_count ?? 0,
     };
-    const totalCost =
-      usage.inputTokens * pricing.input +
-      usage.outputTokens * pricing.output +
-      usage.cachedInputTokens * pricing.cacheRead +
-      usage.cacheCreationInputTokens * pricing.cacheWrite;
-    return { ...usage, totalCost, marketCost: totalCost } satisfies Usage;
+    const inputCost = usage.inputTokens * pricing.input;
+    const outputCost = usage.outputTokens * pricing.output;
+    const cacheReadCost = usage.cachedInputTokens * pricing.cacheRead;
+    const cacheWriteCost = usage.cacheCreationInputTokens * pricing.cacheWrite;
+    const totalCost = inputCost + outputCost + cacheReadCost + cacheWriteCost;
+    return { ...usage, inputCost, outputCost, cacheReadCost, cacheWriteCost, totalCost, marketCost: totalCost } satisfies Usage;
   }));
 }
 
@@ -448,6 +440,10 @@ function sumUsage(usages: Usage[]) {
   return usages.reduce((sum, usage) => ({
     totalCost: sum.totalCost + usage.totalCost,
     marketCost: sum.marketCost + usage.marketCost,
+    inputCost: sum.inputCost + usage.inputCost,
+    outputCost: sum.outputCost + usage.outputCost,
+    cacheReadCost: sum.cacheReadCost + usage.cacheReadCost,
+    cacheWriteCost: sum.cacheWriteCost + usage.cacheWriteCost,
     inputTokens: sum.inputTokens + usage.inputTokens,
     outputTokens: sum.outputTokens + usage.outputTokens,
     cachedInputTokens: sum.cachedInputTokens + usage.cachedInputTokens,
@@ -457,6 +453,10 @@ function sumUsage(usages: Usage[]) {
   }), {
     totalCost: 0,
     marketCost: 0,
+    inputCost: 0,
+    outputCost: 0,
+    cacheReadCost: 0,
+    cacheWriteCost: 0,
     inputTokens: 0,
     outputTokens: 0,
     cachedInputTokens: 0,
@@ -489,8 +489,7 @@ async function main() {
     aiGatewayKeyName,
     aiGatewayBudget,
     startedAt,
-    status: "running",
-    phase: "setup",
+    status: "setup",
     researchModel: RESEARCH_MODEL,
     draftModel: DRAFT_MODEL,
     implementationModel: REPAIR_MODEL,
@@ -500,25 +499,25 @@ async function main() {
   await seedTemplate();
   await setupOpenCode();
 
-  await updateRun({ phase: "precollect" });
+  await updateRun({ status: "precollect" });
   await collectResearch();
   await write("/tmp/research-prompt.md", buildResearchPrompt());
   await write("/tmp/draft-prompt.md", buildDraftPrompt());
 
-  await updateRun({ phase: "research" });
+  await updateRun({ status: "research" });
   const research = await runOpenCodePhase("research", RESEARCH_MODEL, ["run", "Follow the attached redesign prompt.", "--auto", "--dir", WORKDIR, "--title", `Research ${slug}`, "--agent", RESEARCH_AGENT, "--file", "/tmp/research-prompt.md"], { agent: RESEARCH_AGENT });
   await commitAll("chore: add proof");
 
-  await updateRun({ phase: "draft", researchAttempts: research.attempts });
+  await updateRun({ status: "draft", researchAttempts: research.attempts });
   const draft = await runOpenCodePhase("draft", DRAFT_MODEL, ["run", "Follow the attached first-draft prompt.", "--auto", "--dir", WORKDIR, "--title", `Draft ${slug}`, "--agent", DRAFT_AGENT, "--file", "/tmp/draft-prompt.md"], { agent: DRAFT_AGENT });
 
-  await updateRun({ phase: "build", draftAttempts: draft.attempts });
+  await updateRun({ status: "build", draftAttempts: draft.attempts });
   const build = await buildWithRepairs();
 
-  await updateRun({ phase: "commit", buildCommands: build.builds, repairCommands: build.repairs });
+  await updateRun({ status: "commit", buildCommands: build.builds, repairCommands: build.repairs });
   await commitAll("feat: build landing page");
 
-  await updateRun({ phase: "deploy" });
+  await updateRun({ status: "deploy" });
   const redesignUrl = await deploy();
 
   const endedAt = new Date().toISOString();
@@ -528,18 +527,28 @@ async function main() {
   try {
     usageByModel = await estimateUsage();
     totalUsage = sumUsage(usageByModel);
+    await replaceRunSessions(runId, usageByModel.filter((usage) => usage.model).map((usage) => ({
+      model: usage.model ?? "",
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cacheReadTokens: usage.cachedInputTokens,
+      cacheWriteTokens: usage.cacheCreationInputTokens,
+      totalTokens: usage.inputTokens + usage.outputTokens + usage.cachedInputTokens + usage.cacheCreationInputTokens,
+      inputCost: usage.inputCost,
+      outputCost: usage.outputCost,
+      cacheReadCost: usage.cacheReadCost,
+      cacheWriteCost: usage.cacheWriteCost,
+      totalCost: usage.totalCost,
+    })));
   } catch {
     // Usage is best-effort; OpenCode's DB or sqlite may be unavailable.
   }
 
   await updateRun({
     status: "succeeded",
-    phase: "done",
     endedAt,
     wallTimeSeconds,
     redesignUrl,
-    estimatedUsageByModel: usageByModel,
-    estimatedTotalUsage: totalUsage,
     aiGatewayKeyDeletedAt: new Date().toISOString(),
   });
   await deleteAiGatewayKey();

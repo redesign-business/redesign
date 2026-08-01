@@ -4,11 +4,14 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { config as loadEnv } from "dotenv";
 import { Sandbox } from "@vercel/sandbox";
+import { recordStartedRedesign } from "./db.js";
 
 loadEnv({ path: ".env.local", quiet: true });
 
 export type RedesignOptions = {
   site: string;
+  business?: string;
+  businessSlug?: string;
   slug?: string;
   timeoutMinutes?: number;
 };
@@ -16,6 +19,11 @@ export type RedesignOptions = {
 export type RedesignResult = {
   sandbox: string;
   tmuxSession: string;
+  businessId: string;
+  websiteId: string;
+  runId: string;
+  businessName: string;
+  businessSlug: string;
   slug: string;
   originalUrl: string;
   repoUrl: string;
@@ -31,6 +39,7 @@ const DEFAULT_DRAFT_MODEL = "openai/gpt-5.6-sol";
 const DEFAULT_IMPLEMENTATION_MODEL = "deepseek/deepseek-v4-pro";
 const DEFAULT_GITHUB_OWNER = "redesign-business";
 const DEFAULT_BASE_DOMAIN = "redesign.business";
+const DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com";
 const DEFAULT_AI_GATEWAY_BUDGET = 1;
 const SANDBOX_CLI_VERSION = "3.5.5";
 
@@ -89,6 +98,14 @@ export function normalizeSlug(slug: string) {
 
 export function makeSandboxName(slug: string) {
   return `redesign-${slug.slice(0, 32)}-${randomUUID().slice(0, 8)}`;
+}
+
+export function postHogPublicEnv(slug: string) {
+  return {
+    NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN: process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN ?? "",
+    NEXT_PUBLIC_POSTHOG_HOST: process.env.NEXT_PUBLIC_POSTHOG_HOST ?? DEFAULT_POSTHOG_HOST,
+    NEXT_PUBLIC_REDESIGN_SLUG: slug,
+  };
 }
 
 async function must(command: Awaited<ReturnType<Sandbox["runCommand"]>>, label: string) {
@@ -193,6 +210,7 @@ function runnerEnv(options: {
   expectedRedesignUrl: string;
   startedAt: string;
   sandboxName: string;
+  runId: string;
 }) {
   return {
     AI_GATEWAY_API_KEY: options.aiGatewayKey.key,
@@ -210,9 +228,12 @@ function runnerEnv(options: {
     REDESIGN_EXPECTED_URL: options.expectedRedesignUrl,
     REDESIGN_STARTED_AT: options.startedAt,
     REDESIGN_SANDBOX: options.sandboxName,
+    REDESIGN_RUN_ID: options.runId,
+    DATABASE_URL: process.env.DATABASE_URL ?? "",
     AI_GATEWAY_KEY_ID: options.aiGatewayKey.id,
     AI_GATEWAY_KEY_NAME: options.aiGatewayKey.name,
     AI_GATEWAY_BUDGET: String(options.aiGatewayKey.budget),
+    ...postHogPublicEnv(options.slug),
   };
 }
 
@@ -224,6 +245,7 @@ async function uploadRunner(sandbox: Sandbox) {
       content: Buffer.from(JSON.stringify({
         type: "module",
         dependencies: {
+          "@neondatabase/serverless": "^1.1.0",
           cheerio: "^1.2.0",
           turndown: "^7.2.4",
           tsx: "^4.20.6",
@@ -233,6 +255,10 @@ async function uploadRunner(sandbox: Sandbox) {
     {
       path: "/tmp/redesign-runner/src/cloud-runner.ts",
       content: Buffer.from(await readFile(join(process.cwd(), "src", "cloud-runner.ts"), "utf8")),
+    },
+    {
+      path: "/tmp/redesign-runner/src/db.ts",
+      content: Buffer.from(await readFile(join(process.cwd(), "src", "db.ts"), "utf8")),
     },
     {
       path: "/tmp/redesign-runner/src/research.ts",
@@ -248,11 +274,53 @@ async function startTmuxRunner(sandbox: Sandbox, env: Record<string, string>) {
       "set -euo pipefail",
       "command -v tmux >/dev/null || sudo dnf install -y tmux",
       `tmux kill-session -t ${TMUX_SESSION} 2>/dev/null || true`,
-      `tmux new-session -d -s ${TMUX_SESSION} 'cd /tmp/redesign-runner && npm install && npx tsx src/cloud-runner.ts; status=$?; echo; echo "redesign runner exited with status $status"; exec bash -l'`,
+      `tmux new-session -d -s ${TMUX_SESSION} 'cd /tmp/redesign-runner && npm install && npx tsx src/cloud-runner.ts; status=$?; echo; echo "redesign runner exited with status $status"; exit $status'`,
       `tmux set-option -t ${TMUX_SESSION} status off`,
     ].join("\n")],
     env,
   }), "tmux start");
+}
+
+async function cloneJobRepo(sandbox: Sandbox, repoUrl: string) {
+  await must(await sandbox.runCommand({
+    cmd: "bash",
+    args: ["-lc", [
+      "set -euo pipefail",
+      `find ${WORKDIR} -mindepth 1 -maxdepth 1 -exec rm -rf {} +`,
+      `git clone --depth 1 ${JSON.stringify(repoUrl)} ${WORKDIR}`,
+    ].join("\n")],
+  }), "job repo clone");
+}
+
+async function createJobSandbox(params: { name: string; repoUrl: string; githubToken: string; timeout: number; slug: string }) {
+  const common = {
+    name: params.name,
+    timeout: params.timeout,
+    persistent: false,
+    resources: { vcpus: 2 },
+    tags: { app: "redesign-hosted-2", slug: params.slug },
+  };
+  if (process.env.REDESIGN_TEMPLATE_SNAPSHOT_ID) {
+    const sandbox = await Sandbox.create({
+      ...common,
+      source: { type: "snapshot", snapshotId: process.env.REDESIGN_TEMPLATE_SNAPSHOT_ID },
+    });
+    await cloneJobRepo(sandbox, params.repoUrl);
+    return sandbox;
+  }
+  if (process.env.REDESIGN_TEMPLATE_SANDBOX) {
+    const sandbox = await Sandbox.fork({
+      ...common,
+      sourceSandbox: process.env.REDESIGN_TEMPLATE_SANDBOX,
+    });
+    await cloneJobRepo(sandbox, params.repoUrl);
+    return sandbox;
+  }
+  return Sandbox.create({
+    ...common,
+    runtime: "node24",
+    source: { type: "git", url: params.repoUrl, username: "x-access-token", password: params.githubToken, depth: 1 },
+  });
 }
 
 function sandboxExecArgs(sandboxName: string) {
@@ -292,6 +360,8 @@ export async function attachToSandbox(sandboxName: string) {
 export async function runRedesign(options: RedesignOptions): Promise<RedesignResult> {
   const originalUrl = normalizeHttpUrl(options.site);
   const slug = normalizeSlug(options.slug ?? slugFromUrl(originalUrl));
+  const businessSlug = normalizeSlug(options.businessSlug ?? slug);
+  const businessName = options.business ?? businessSlug;
   const researchModel = DEFAULT_RESEARCH_MODEL;
   const draftModel = DEFAULT_DRAFT_MODEL;
   const implementationModel = DEFAULT_IMPLEMENTATION_MODEL;
@@ -300,6 +370,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
   const startedAt = new Date().toISOString();
 
   if (!githubToken) throw new Error("Missing GITHUB_TOKEN");
+  if (!process.env.DATABASE_URL) throw new Error("Missing DATABASE_URL");
 
   const repo = await createGithubRepo(slug);
   const aiGatewayKey = await createAiGatewayKey(slug);
@@ -307,13 +378,26 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
   let runnerStarted = false;
 
   try {
-    sandbox = await Sandbox.create({
+    sandbox = await createJobSandbox({
       name: makeSandboxName(slug),
-      runtime: "node24",
-      source: { type: "git", url: repo.cloneUrl, username: "x-access-token", password: githubToken, depth: 1 },
       timeout: (options.timeoutMinutes ?? 90) * 60 * 1000,
-      resources: { vcpus: 2 },
-      tags: { app: "redesign-hosted-2", slug },
+      repoUrl: repo.cloneUrl,
+      githubToken,
+      slug,
+    });
+
+    const dbRecord = await recordStartedRedesign({
+      businessName,
+      businessSlug,
+      websiteSlug: slug,
+      sourceUrl: originalUrl,
+      repoUrl: repo.htmlUrl,
+      expectedRedesignUrl,
+      sandbox: sandbox.name,
+      tmuxSession: TMUX_SESSION,
+      model: `${researchModel} + ${draftModel} + ${implementationModel}`,
+      aiGatewayBudget: aiGatewayKey.budget,
+      startedAt,
     });
 
     const env = runnerEnv({
@@ -325,6 +409,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       expectedRedesignUrl,
       startedAt,
       sandboxName: sandbox.name,
+      runId: dbRecord.runId,
     });
     await uploadRunner(sandbox);
     await startTmuxRunner(sandbox, env);
@@ -333,6 +418,9 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
     const result = {
       sandbox: sandbox.name,
       tmuxSession: TMUX_SESSION,
+      ...dbRecord,
+      businessName,
+      businessSlug,
       slug,
       originalUrl,
       repoUrl: repo.htmlUrl,

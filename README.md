@@ -16,6 +16,9 @@ Fill in:
 - `GITHUB_TOKEN`: token that can create repos under `redesign-business` and push to them.
 - `VERCEL_TOKEN`: token the app uses to create a budgeted AI Gateway key for each job, and that OpenCode can use for the final intentional Vercel deploy.
 - `VERCEL_TEAM_ID`: recommended when the Gateway and deployments live under a Vercel team.
+- `DATABASE_URL`: hosted Postgres URL for tracking businesses, websites, and runs.
+- `NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN`: optional PostHog project token. When set, every generated landing page gets PostHog tracking.
+- `NEXT_PUBLIC_POSTHOG_HOST`: optional PostHog host. Defaults to `https://us.i.posthog.com`.
 
 Each job creates a fresh AI Gateway key with a default `$1` budget and deletes it when the job exits. The redesign flow is fixed: DeepSeek researches, Sol creates the page draft, then DeepSeek builds, commits, and deploys.
 
@@ -39,7 +42,19 @@ Override the slug when the website entity should not use the source domain:
 npm run redesign -- https://example-business.com --slug example-plumbing
 ```
 
+If one business has multiple websites, keep the business slug stable and give each website its own slug:
+
+```bash
+npm run redesign -- https://example-business.com --business "Example Plumbing" --business-slug example-plumbing --slug example-plumbing-main
+```
+
 The command creates the GitHub repo, AI Gateway key, and Vercel Sandbox, uploads the cloud runner, starts it in a sandbox tmux session, then attaches your terminal to that session.
+
+Started redesigns are tracked in Postgres. The first run creates the `businesses`, `websites`, and `runs` tables if they do not exist.
+
+PostHog tracking is injected into the seeded Next.js template when `NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN` is set. Use one PostHog project for the redesign landing pages and filter by `host` or the `redesign_slug` property instead of creating a PostHog project per generated site.
+
+When `REDESIGN_TEMPLATE_SNAPSHOT_ID` is present in `.env.local`, each run creates the job sandbox from that warmed snapshot instead of a cold runtime. The snapshot should contain tmux, OpenCode, runner dependencies, Playwright Chromium, and Chromium's Linux libraries. The job sandbox still clones the newly created GitHub repo into `/vercel/sandbox`; the template sandbox is never used for a redesign run.
 
 ## Recovery
 
@@ -55,6 +70,6 @@ Delete a sandbox explicitly when you are done:
 npm run stop -- --sandbox <sandbox>
 ```
 
-The final run state lives in the generated repo's `redesign-run.json`.
+Run state lives in Postgres.
 
-Skipped: dashboard, queue, workflow, branch previews, automated tests. Add them when this pilot proves they are needed.
+Skipped: dashboard, queue, workflow, branch previews. Add them when this pilot proves they are needed.

@@ -3,6 +3,8 @@
 ## Glossary
 
 - **Redesign job**: one request to improve a small business website in a target GitHub repo.
+- **Run**: one internal generation attempt for a website. Runs are production history, not customer-facing sales activity.
+- **Session**: one model-level usage record for a run, using the same model identifier string as AI Gateway.
 - **Sandbox**: the Vercel Sandbox microVM where OpenCode runs, so local machine resources are not used.
 - **Agent command**: the detached OpenCode process running inside a sandbox.
 - **Website slug**: the stable identifier for one website entity. The GitHub repo, Vercel project, and preferred redesign subdomain all use this slug. It usually comes from the source domain without its top-level domain, so `example.com` becomes `example`; it can differ when one business has multiple websites.

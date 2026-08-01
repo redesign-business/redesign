@@ -3,7 +3,7 @@ import { attachToSandbox, cleanupSandbox, parseArgs, readRequired, runRedesign }
 const [cmd = "help", ...rest] = process.argv.slice(2);
 const usage = [
   "Usage:",
-  "  npm run redesign -- <url> [--slug <slug>]",
+  "  npm run redesign -- <url> [--slug <slug>] [--business <name>] [--business-slug <slug>]",
   "  npm run attach -- --sandbox <sandbox>",
   "  npm run stop -- --sandbox <sandbox>",
 ].join("\n");
@@ -22,6 +22,8 @@ try {
 
     await runRedesign({
       site,
+      business: args.get("business"),
+      businessSlug: args.get("business-slug"),
       slug: args.get("slug"),
       timeoutMinutes: args.has("timeout") ? Number(args.get("timeout")) : undefined,
     });
