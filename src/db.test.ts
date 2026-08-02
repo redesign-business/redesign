@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { config as loadEnv } from "dotenv";
 import { neon } from "@neondatabase/serverless";
-import { listBusinesses, recordStartedRedesign, replaceRunSessions, updateRunData, upsertBusiness, upsertRun } from "./db.js";
+import { deleteWebsiteRecord, listBusinesses, recordStartedRedesign, replaceRunSessions, updateBusinessContactInfo, updateRunData, upsertRun } from "./db.js";
 
 loadEnv({ path: ".env.local", quiet: true });
 
@@ -47,9 +47,7 @@ if (!process.env.DATABASE_URL) {
     assert.equal(first.businessId, second.businessId);
     assert.notEqual(first.websiteId, second.websiteId);
     assert.notEqual(first.runId, second.runId);
-    await upsertBusiness({
-      name: "Test Business Renamed",
-      slug: businessSlug,
+    await updateBusinessContactInfo(first.businessId, {
       email: "owner@example.test",
       contactFormUrl: "https://example.test/contact",
     });
@@ -144,6 +142,22 @@ if (!process.env.DATABASE_URL) {
       { model: "deepseek/deepseek-v4-pro", inputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 40, totalTokens: 100, inputCost: 0.01, outputCost: 0.02, cacheReadCost: 0.03, cacheWriteCost: 0.04, totalCost: 0.1 },
       { model: "openai/gpt-5.6-sol", inputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4, totalTokens: 10, inputCost: 0.11, outputCost: 0.12, cacheReadCost: 0.13, cacheWriteCost: 0.14, totalCost: 0.5 },
     ]);
+
+    assert.equal(await deleteWebsiteRecord(websiteSlug), true);
+    const [counts] = await db`
+      select
+        (select count(*) from websites where slug = ${websiteSlug}) as websites,
+        (
+          select count(*) from runs
+          where sandbox in (${sandbox}, ${`${sandbox}-seeded`})
+        ) as runs,
+        (select count(*) from sessions where run_id = ${first.runId}) as sessions
+    `;
+    assert.deepEqual({
+      websites: Number(counts.websites),
+      runs: Number(counts.runs),
+      sessions: Number(counts.sessions),
+    }, { websites: 0, runs: 0, sessions: 0 });
 
   } finally {
     await db`

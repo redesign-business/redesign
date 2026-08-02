@@ -30,6 +30,15 @@ export type BusinessSeed = {
   reviewCount?: number | null;
 };
 
+export type BusinessContactRecord = {
+  id: string;
+  name: string;
+  slug: string;
+  website: string;
+  email: string | null;
+  contactFormUrl: string | null;
+};
+
 export type WebsiteSeed = {
   businessSlug: string;
   name?: string;
@@ -37,6 +46,13 @@ export type WebsiteSeed = {
   sourceUrl: string;
   repoUrl?: string | null;
   expectedRedesignUrl?: string | null;
+};
+
+export type WebsiteRecord = {
+  id: string;
+  slug: string;
+  repoUrl: string | null;
+  url: string | null;
 };
 
 export type SessionSeed = {
@@ -177,6 +193,40 @@ export async function upsertBusiness(input: BusinessSeed): Promise<string> {
   return String(business.id);
 }
 
+export async function updateBusinessContactInfo(
+  businessId: string,
+  input: Pick<BusinessSeed, "email" | "contactFormUrl">,
+): Promise<void> {
+  if (!input.email && !input.contactFormUrl) return;
+  await ensureSchema();
+  await sql()`
+    update businesses set
+      email = coalesce(${input.email ?? null}, email),
+      contact_form_url = coalesce(${input.contactFormUrl ?? null}, contact_form_url),
+      updated_at = now()
+    where id = ${businessId}
+  `;
+}
+
+export async function listBusinessesForContactBackfill(): Promise<BusinessContactRecord[]> {
+  await ensureSchema();
+  const rows = await sql()`
+    select id, name, slug, website, email, contact_form_url
+    from businesses
+    where website is not null
+      and (email is null or contact_form_url is null)
+    order by created_at
+  ` as Row[];
+  return rows.map((row) => ({
+    id: String(row.id),
+    name: String(row.name),
+    slug: String(row.slug),
+    website: String(row.website),
+    email: row.email === null ? null : String(row.email),
+    contactFormUrl: row.contact_form_url === null ? null : String(row.contact_form_url),
+  }));
+}
+
 export async function upsertWebsite(input: WebsiteSeed): Promise<string> {
   await ensureSchema();
   let [business] = await sql()`select id from businesses where slug = ${input.businessSlug} limit 1` as Row[];
@@ -199,6 +249,29 @@ export async function upsertWebsite(input: WebsiteSeed): Promise<string> {
     returning id
   ` as Row[];
   return String(website.id);
+}
+
+export async function getWebsite(slug: string): Promise<WebsiteRecord | undefined> {
+  await ensureSchema();
+  const [website] = await sql()`
+    select id, slug, repo_url, url
+    from websites
+    where slug = ${slug}
+    limit 1
+  ` as Row[];
+  if (!website) return undefined;
+  return {
+    id: String(website.id),
+    slug: String(website.slug),
+    repoUrl: website.repo_url === null ? null : String(website.repo_url),
+    url: website.url === null ? null : String(website.url),
+  };
+}
+
+export async function deleteWebsiteRecord(slug: string): Promise<boolean> {
+  await ensureSchema();
+  const rows = await sql()`delete from websites where slug = ${slug} returning id` as Row[];
+  return rows.length > 0;
 }
 
 export async function recordStartedRedesign(input: {

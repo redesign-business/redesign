@@ -13,7 +13,7 @@ cp .env.example .env.local
 
 Fill in:
 
-- `GITHUB_TOKEN`: token that can create repos under `redesign-business` and push to them.
+- `GITHUB_TOKEN`: token that can create repos under `redesign-business`, push to them, and delete them.
 - `VERCEL_TOKEN`: token the app uses to create a budgeted AI Gateway key for each job, and that OpenCode can use for the final intentional Vercel deploy.
 - `VERCEL_TEAM_ID`: recommended when the Gateway and deployments live under a Vercel team.
 - `DATABASE_URL`: hosted Postgres URL for tracking businesses, websites, and runs.
@@ -51,6 +51,14 @@ npm run redesign -- https://example-business.com --business "Example Plumbing" -
 The command creates the GitHub repo, AI Gateway key, and Vercel Sandbox, uploads the cloud runner, starts it in a sandbox tmux session, then attaches your terminal to that session.
 
 Started redesigns are tracked in Postgres. The first run creates the `businesses`, `websites`, and `runs` tables if they do not exist.
+
+## Delete a Website
+
+```bash
+npm run delete -- --slug example-plumbing
+```
+
+This deletes the GitHub repo, the Vercel project, and the website row. Postgres cascades the website delete to its runs and sessions.
 
 PostHog tracking is injected into the seeded Next.js template when `NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN` is set. Use one PostHog project for the redesign landing pages and filter by `host` or the `redesign_slug` property instead of creating a PostHog project per generated site.
 

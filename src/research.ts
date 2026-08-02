@@ -9,6 +9,11 @@ export type ResearchFile = {
   content: Buffer;
 };
 
+export type ContactInfo = {
+  email?: string;
+  contactFormUrl?: string;
+};
+
 type PageData = {
   url: string;
   title: string;
@@ -43,49 +48,121 @@ const turndown = new TurndownService({
   codeBlockStyle: "fenced",
 });
 
-export async function collectResearchFiles(site: string, workdir: string): Promise<ResearchFile[]> {
-  const origin = new URL(site).origin;
+export async function collectResearch(site: string, workdir: string): Promise<{ files: ResearchFile[]; contactInfo: ContactInfo }> {
+  const { pages, imageCandidates, contactInfo } = await crawlSite(site);
+  const images = await downloadImages(dedupeImages(imageCandidates));
+  return {
+    contactInfo,
+    files: [
+      {
+        path: `${workdir}/raw.md`,
+        content: Buffer.from(rawMarkdown(site, pages, images)),
+      },
+      {
+        path: `${workdir}/public/images/manifest.json`,
+        content: Buffer.from(`${JSON.stringify({ sourceUrl: site, images }, null, 2)}\n`),
+      },
+      ...images.map((image) => ({
+        path: `${workdir}/${image.localPath}`,
+        content: imageContent.get(image.localPath) ?? Buffer.alloc(0),
+      })),
+    ],
+  };
+}
+
+export async function collectContactInfo(site: string): Promise<ContactInfo> {
+  return (await crawlSite(site)).contactInfo;
+}
+
+async function crawlSite(site: string) {
+  let origin = new URL(site).origin;
   const seen = new Set<string>();
   const queue = [site];
   const pages: PageData[] = [];
   const imageCandidates: ImageCandidate[] = [];
+  let email: string | undefined;
+  let contactFormUrl: string | undefined;
 
   while (queue.length && pages.length < maxPages) {
     const url = queue.shift();
     if (!url || seen.has(url)) continue;
     seen.add(url);
 
-    const html = await fetchHtml(url);
-    if (!html) continue;
+    const fetched = await fetchHtml(url);
+    if (!fetched) continue;
+    const { html, url: pageUrl } = fetched;
+    seen.add(pageUrl);
+    if (pages.length === 0) origin = new URL(pageUrl).origin;
 
-    const page = htmlToMarkdown(url, html);
+    const page = htmlToMarkdown(pageUrl, html);
     pages.push(page);
 
     const $ = cheerio.load(html);
     $("script, style, noscript").remove();
-    for (const href of sameDomainLinks($, url, origin)) {
+    const contact = inspectContactInfo($, pageUrl);
+    email ??= contact.email;
+    contactFormUrl ??= contact.contactFormUrl;
+    const links = sameDomainLinks($, pageUrl, origin)
+      .sort((left, right) => Number(!hasContactIntent(left)) - Number(!hasContactIntent(right)));
+    for (const href of links) {
       if (!seen.has(href) && !queue.includes(href) && pages.length + queue.length < maxPages) {
         queue.push(href);
       }
     }
-    imageCandidates.push(...imageUrls($, url, page.title).slice(0, maxImagesPerPage));
+    imageCandidates.push(...imageUrls($, pageUrl, page.title).slice(0, maxImagesPerPage));
   }
 
-  const images = await downloadImages(dedupeImages(imageCandidates));
-  return [
-    {
-      path: `${workdir}/raw.md`,
-      content: Buffer.from(rawMarkdown(site, pages, images)),
-    },
-    {
-      path: `${workdir}/public/images/manifest.json`,
-      content: Buffer.from(`${JSON.stringify({ sourceUrl: site, images }, null, 2)}\n`),
-    },
-    ...images.map((image) => ({
-      path: `${workdir}/${image.localPath}`,
-      content: imageContent.get(image.localPath) ?? Buffer.alloc(0),
-    })),
-  ];
+  return { pages, imageCandidates, contactInfo: { email, contactFormUrl } };
+}
+
+export function extractContactInfo(html: string, pageUrl: string): ContactInfo {
+  const $ = cheerio.load(html);
+  $("script, style, noscript").remove();
+  const contact = inspectContactInfo($, pageUrl);
+  return { email: contact.email, contactFormUrl: contact.contactFormUrl };
+}
+
+function inspectContactInfo($: cheerio.CheerioAPI, pageUrl: string) {
+  const mailto = $("a[href^='mailto:' i]")
+    .map((_, element) => emailAddress(($(element).attr("href") ?? "").slice(7).split("?")[0] ?? ""))
+    .get()
+    .find(Boolean);
+  const visible = $.root().find("*").contents()
+    .filter((_, node) => node.type === "text")
+    .map((_, node) => $(node).text())
+    .get()
+    .join(" ");
+  const contactFormUrl = $("form").toArray().some((form) => isContactForm($, form, pageUrl)) ? pageUrl : undefined;
+  return { email: mailto ?? emailAddress(visible), contactFormUrl };
+}
+
+function emailAddress(value: string) {
+  try {
+    const email = decodeURIComponent(value).match(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.[a-z]{2,24}(?=$|[^a-z])/i)?.[0];
+    if (!email) return undefined;
+    if (/@(?:example\.(?:com|org|net)|example\.test)$/i.test(email)) return undefined;
+    if (/^(?:example|your-?email|email)@/i.test(email)) return undefined;
+    return email;
+  } catch {
+    return undefined;
+  }
+}
+
+function isContactForm($: cheerio.CheerioAPI, form: Element, pageUrl: string) {
+  const $form = $(form);
+  const fields = $form.find("input:not([type=hidden]):not([type=submit]):not([type=button]), textarea, select");
+  const fieldLabels = fields.toArray().map((field) => ["name", "placeholder", "aria-label"]
+    .map((attribute) => $(field).attr(attribute))
+    .filter(Boolean)
+    .join(" "))
+    .join(" ");
+  const description = `${$form.attr("id") ?? ""} ${$form.attr("class") ?? ""} ${$form.attr("action") ?? ""} ${fieldLabels} ${$form.text()}`;
+  const hasReplyField = /email|phone|message/i.test(fieldLabels);
+  return fields.length >= 2 && (hasContactIntent(description) || (hasContactIntent(new URL(pageUrl).pathname) && hasReplyField));
+}
+
+function hasContactIntent(value: string) {
+  return /contact|quote|estimate|consult|inquir|get[-_ ]?in[-_ ]?touch|request[-_ ]?(?:service|quote|estimate)|start[-_ ]?(?:a[-_ ]?)?project/i.test(value);
 }
 
 export function normalizeSameDomainUrl(value: string, baseUrl: string, origin: string) {
@@ -113,7 +190,7 @@ async function fetchHtml(url: string) {
   const response = await fetchWithTimeout(url);
   if (!response?.ok) return undefined;
   if (!response.headers.get("content-type")?.toLowerCase().includes("text/html")) return undefined;
-  return response.text();
+  return { html: await response.text(), url: response.url };
 }
 
 async function fetchWithTimeout(url: string) {

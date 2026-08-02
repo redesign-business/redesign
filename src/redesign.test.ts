@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { businessSummaryFromRow } from "./db.js";
+import { phaseComplete } from "./phase.js";
 import {
+  githubRepoFromUrl,
   makeSandboxName,
   normalizeHttpUrl,
   normalizeSlug,
@@ -9,7 +11,11 @@ import {
   readRequired,
   slugFromUrl,
 } from "./redesign.js";
-import { normalizeSameDomainUrl, parseSrcset } from "./research.js";
+import { extractContactInfo, normalizeSameDomainUrl, parseSrcset } from "./research.js";
+
+assert.equal(phaseComplete(0), true);
+assert.equal(phaseComplete(0, false), false);
+assert.equal(phaseComplete(1, true), true);
 
 const parsed = parseArgs(["https://acme.test", "--slug", "Acme Plumbing"]);
 assert.deepEqual(parsed.positional, ["https://acme.test"]);
@@ -24,6 +30,14 @@ assert.equal(slugFromUrl("https://jobs.Acme-Plumbing.com/services"), "jobs-acme-
 assert.equal(normalizeSlug("Acme Plumbing"), "acme-plumbing");
 assert.throws(() => normalizeSlug("-"), /Invalid slug/);
 assert.match(makeSandboxName("acme"), /^redesign-acme-[a-f0-9]{8}$/);
+assert.deepEqual(githubRepoFromUrl("https://github.com/redesign-business/acme", "fallback"), {
+  owner: "redesign-business",
+  repo: "acme",
+});
+assert.deepEqual(githubRepoFromUrl("git@github.com:redesign-business/acme.git", "fallback"), {
+  owner: "redesign-business",
+  repo: "acme",
+});
 
 const previousPostHogToken = process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN;
 const previousPostHogHost = process.env.NEXT_PUBLIC_POSTHOG_HOST;
@@ -54,6 +68,23 @@ assert.equal(
 assert.deepEqual(
   parseSrcset("/small.jpg 400w, https://acme.test/large.jpg 1200w", "https://acme.test/work/"),
   ["https://acme.test/small.jpg", "https://acme.test/large.jpg"],
+);
+assert.deepEqual(
+  extractContactInfo('<a href="mailto:hello@acme.test?subject=Hi">Email us</a><a href="/contact">Get a quote</a>', "https://acme.test/"),
+  { email: "hello@acme.test", contactFormUrl: undefined },
+);
+assert.deepEqual(
+  extractContactInfo('<form><input name="name"><input type="email"><textarea name="message"></textarea></form>', "https://acme.test/contact"),
+  { email: undefined, contactFormUrl: "https://acme.test/contact" },
+);
+assert.equal(
+  extractContactInfo('<a href="mailto:hello@acme.com828-555-0100">Email us</a>', "https://acme.test/").email,
+  "hello@acme.com",
+);
+assert.equal(extractContactInfo("<p>example@email.com</p>", "https://acme.test/").email, undefined);
+assert.equal(
+  extractContactInfo('<form><input name="student"><input type="email"><button>Register</button></form>', "https://acme.test/classes").contactFormUrl,
+  undefined,
 );
 
 assert.deepEqual(businessSummaryFromRow({

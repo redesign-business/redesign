@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "redesign": "tsx src/cli.ts redesign",
+    "backfill-contacts": "tsx src/cli.ts backfill-contacts",
+    "delete": "tsx src/cli.ts delete",
     "attach": "tsx src/cli.ts attach",
     "stop": "tsx src/cli.ts stop",
     "test": "tsx src/redesign.test.ts && tsx src/db.test.ts",

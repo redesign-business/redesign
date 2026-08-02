@@ -2,8 +2,9 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { replaceRunSessions, updateRunData } from "./db.js";
-import { collectResearchFiles } from "./research.js";
+import { replaceRunSessions, updateBusinessContactInfo, updateRunData } from "./db.js";
+import { phaseComplete } from "./phase.js";
+import { collectResearch as collectResearchData } from "./research.js";
 
 type Usage = {
   model?: string;
@@ -33,9 +34,9 @@ type PermissionConfig = "allow" | Record<string, unknown>;
 const WORKDIR = "/vercel/sandbox";
 const OPENCODE_BIN = "/home/vercel-sandbox/.opencode/node_modules/.bin/opencode";
 const TEMPLATE_REPO = "https://github.com/redesign-business/template.git";
-const RESEARCH_MODEL = "deepseek/deepseek-v4-pro";
+const RESEARCH_MODEL = "deepseek/deepseek-v4-flash-0731";
 const DRAFT_MODEL = "openai/gpt-5.6-sol";
-const REPAIR_MODEL = "deepseek/deepseek-v4-pro";
+const REPAIR_MODEL = "deepseek/deepseek-v4-flash-0731";
 const RESEARCH_AGENT = "research";
 const DRAFT_AGENT = "draft";
 const MAX_PHASE_CONTINUES = Number(process.env.REDESIGN_MAX_PHASE_CONTINUES ?? 5);
@@ -52,6 +53,7 @@ const originalUrl = required("REDESIGN_SITE");
 const repoUrl = required("REDESIGN_REPO_URL");
 const expectedRedesignUrl = required("REDESIGN_EXPECTED_URL");
 const startedAt = required("REDESIGN_STARTED_AT");
+const businessId = required("REDESIGN_BUSINESS_ID");
 const runId = required("REDESIGN_RUN_ID");
 const aiGatewayKeyId = required("AI_GATEWAY_KEY_ID");
 const aiGatewayKeyName = required("AI_GATEWAY_KEY_NAME");
@@ -272,21 +274,27 @@ async function setupOpenCode() {
 }
 
 async function collectResearch() {
-  const files = await collectResearchFiles(originalUrl, WORKDIR);
+  const { files, contactInfo } = await collectResearchData(originalUrl, WORKDIR);
   for (const file of files) {
     await write(file.path, file.content);
   }
+  await updateBusinessContactInfo(businessId, contactInfo);
   await commitAll("chore: add scraped research inputs");
 }
 
-async function runOpenCodePhase(phase: string, model: string, args: string[], options: { agent?: string } = {}) {
+async function runOpenCodePhase(
+  phase: string,
+  model: string,
+  args: string[],
+  options: { agent?: string; deliverableDelivered?: () => Promise<boolean> } = {},
+) {
   const attempts: string[] = [];
   let output = "";
   let currentArgs = args;
 
   for (let retry = 0; retry <= MAX_PHASE_CONTINUES; retry += 1) {
     if (retry > 0) {
-      console.error(`\n${phase} exited before completion; retrying with OpenCode continue (${retry}/${MAX_PHASE_CONTINUES}).`);
+      console.error(`\n${phase} did not deliver; retrying with OpenCode continue (${retry}/${MAX_PHASE_CONTINUES}).`);
       currentArgs = ["run", "continue", "--continue", "--auto", "--dir", WORKDIR, options.agent ? "--agent" : "--model", options.agent ?? opencodeModel(model)];
     }
     const id = `${phase}-${randomUUID().slice(0, 8)}`;
@@ -295,11 +303,12 @@ async function runOpenCodePhase(phase: string, model: string, args: string[], op
 
     const result = await run(OPENCODE_BIN, currentArgs, { cwd: WORKDIR, allowFailure: true, interactive: true });
     output += result.output;
-    if (result.exitCode === 0) return { output, attempts };
+    const delivered = options.deliverableDelivered ? await options.deliverableDelivered() : undefined;
+    if (phaseComplete(result.exitCode, delivered)) return { output, attempts };
     if (isBudgetFailure(result.output)) throw new Error(`${phase} failed with budget/quota error\n${outputTail(result.output)}`);
   }
 
-  throw new Error(`${phase} failed after ${MAX_PHASE_CONTINUES} continue attempts\n${outputTail(output)}`);
+  throw new Error(`${phase} did not deliver after ${MAX_PHASE_CONTINUES} continue attempts\n${outputTail(output)}`);
 }
 
 async function buildWithRepairs() {
@@ -505,11 +514,17 @@ async function main() {
   await write("/tmp/draft-prompt.md", buildDraftPrompt());
 
   await updateRun({ status: "research" });
-  const research = await runOpenCodePhase("research", RESEARCH_MODEL, ["run", "Follow the attached redesign prompt.", "--auto", "--dir", WORKDIR, "--title", `Research ${slug}`, "--agent", RESEARCH_AGENT, "--file", "/tmp/research-prompt.md"], { agent: RESEARCH_AGENT });
+  const research = await runOpenCodePhase("research", RESEARCH_MODEL, ["run", "Follow the attached redesign prompt.", "--auto", "--dir", WORKDIR, "--title", `Research ${slug}`, "--agent", RESEARCH_AGENT, "--file", "/tmp/research-prompt.md"], {
+    agent: RESEARCH_AGENT,
+    deliverableDelivered: async () => (await sh("test -s proof.md", { allowFailure: true })).exitCode === 0,
+  });
   await commitAll("chore: add proof");
 
   await updateRun({ status: "draft", researchAttempts: research.attempts });
-  const draft = await runOpenCodePhase("draft", DRAFT_MODEL, ["run", "Follow the attached first-draft prompt.", "--auto", "--dir", WORKDIR, "--title", `Draft ${slug}`, "--agent", DRAFT_AGENT, "--file", "/tmp/draft-prompt.md"], { agent: DRAFT_AGENT });
+  const draft = await runOpenCodePhase("draft", DRAFT_MODEL, ["run", "Follow the attached first-draft prompt.", "--auto", "--dir", WORKDIR, "--title", `Draft ${slug}`, "--agent", DRAFT_AGENT, "--file", "/tmp/draft-prompt.md"], {
+    agent: DRAFT_AGENT,
+    deliverableDelivered: async () => (await sh("git diff --quiet -- app/page.tsx", { allowFailure: true })).exitCode === 1,
+  });
 
   await updateRun({ status: "build", draftAttempts: draft.attempts });
   const build = await buildWithRepairs();

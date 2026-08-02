@@ -4,7 +4,8 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { config as loadEnv } from "dotenv";
 import { Sandbox } from "@vercel/sandbox";
-import { recordStartedRedesign } from "./db.js";
+import { deleteWebsiteRecord, getWebsite, listBusinessesForContactBackfill, recordStartedRedesign, updateBusinessContactInfo } from "./db.js";
+import { collectContactInfo } from "./research.js";
 
 loadEnv({ path: ".env.local", quiet: true });
 
@@ -32,11 +33,18 @@ export type RedesignResult = {
   aiGatewayBudget: number;
 };
 
+export type DeleteWebsiteResult = {
+  slug: string;
+  repo: string;
+  vercelProject: string;
+  deletedRecord: boolean;
+};
+
 const WORKDIR = "/vercel/sandbox";
 const TMUX_SESSION = "redesign";
-const DEFAULT_RESEARCH_MODEL = "deepseek/deepseek-v4-pro";
+const DEFAULT_RESEARCH_MODEL = "deepseek/deepseek-v4-flash-0731";
 const DEFAULT_DRAFT_MODEL = "openai/gpt-5.6-sol";
-const DEFAULT_IMPLEMENTATION_MODEL = "deepseek/deepseek-v4-pro";
+const DEFAULT_IMPLEMENTATION_MODEL = "deepseek/deepseek-v4-flash-0731";
 const DEFAULT_GITHUB_OWNER = "redesign-business";
 const DEFAULT_BASE_DOMAIN = "redesign.business";
 const DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com";
@@ -152,6 +160,52 @@ async function createGithubRepo(slug: string) {
   return { cloneUrl: json.clone_url, htmlUrl: json.html_url };
 }
 
+export function githubRepoFromUrl(repoUrl: string | null | undefined, fallbackSlug: string) {
+  const owner = process.env.GITHUB_OWNER ?? DEFAULT_GITHUB_OWNER;
+  if (!repoUrl) return { owner, repo: fallbackSlug };
+
+  const ssh = repoUrl.match(/^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/);
+  if (ssh) return { owner: ssh[1], repo: ssh[2] };
+
+  const url = new URL(repoUrl);
+  if (url.hostname !== "github.com") throw new Error(`Expected GitHub repo URL: ${repoUrl}`);
+  const [urlOwner, rawRepo] = url.pathname.replace(/^\/|\/$/g, "").split("/");
+  if (!urlOwner || !rawRepo) throw new Error(`Expected GitHub repo URL: ${repoUrl}`);
+  return { owner: urlOwner, repo: rawRepo.replace(/\.git$/, "") };
+}
+
+async function deleteGithubRepo(repoUrl: string | null | undefined, slug: string) {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) throw new Error("Missing GITHUB_TOKEN");
+  const repo = githubRepoFromUrl(repoUrl, slug);
+  const response = await fetch(`https://api.github.com/repos/${repo.owner}/${repo.repo}`, {
+    method: "DELETE",
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${token}`,
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+  if (response.ok || response.status === 404) return `${repo.owner}/${repo.repo}`;
+  const json = await response.json().catch(() => ({})) as { message?: string };
+  throw new Error(`GitHub repo delete failed: ${json.message ?? response.statusText}`);
+}
+
+async function deleteVercelProject(slug: string) {
+  const token = process.env.VERCEL_TOKEN;
+  if (!token) throw new Error("Missing VERCEL_TOKEN");
+
+  const params = new URLSearchParams();
+  if (process.env.VERCEL_TEAM_ID) params.set("teamId", process.env.VERCEL_TEAM_ID);
+  const response = await fetch(`https://api.vercel.com/v9/projects/${encodeURIComponent(slug)}${params.size ? `?${params}` : ""}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (response.ok || response.status === 404) return slug;
+  const json = await response.json().catch(() => ({})) as { error?: { message?: string }; message?: string };
+  throw new Error(`Vercel project delete failed: ${json.error?.message ?? json.message ?? response.statusText}`);
+}
+
 async function createAiGatewayKey(slug: string) {
   const token = process.env.VERCEL_TOKEN;
   if (!token) throw new Error("Missing VERCEL_TOKEN");
@@ -210,6 +264,7 @@ function runnerEnv(options: {
   expectedRedesignUrl: string;
   startedAt: string;
   sandboxName: string;
+  businessId: string;
   runId: string;
 }) {
   return {
@@ -228,6 +283,7 @@ function runnerEnv(options: {
     REDESIGN_EXPECTED_URL: options.expectedRedesignUrl,
     REDESIGN_STARTED_AT: options.startedAt,
     REDESIGN_SANDBOX: options.sandboxName,
+    REDESIGN_BUSINESS_ID: options.businessId,
     REDESIGN_RUN_ID: options.runId,
     DATABASE_URL: process.env.DATABASE_URL ?? "",
     AI_GATEWAY_KEY_ID: options.aiGatewayKey.id,
@@ -259,6 +315,10 @@ async function uploadRunner(sandbox: Sandbox) {
     {
       path: "/tmp/redesign-runner/src/db.ts",
       content: Buffer.from(await readFile(join(process.cwd(), "src", "db.ts"), "utf8")),
+    },
+    {
+      path: "/tmp/redesign-runner/src/phase.ts",
+      content: Buffer.from(await readFile(join(process.cwd(), "src", "phase.ts"), "utf8")),
     },
     {
       path: "/tmp/redesign-runner/src/research.ts",
@@ -409,6 +469,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
       expectedRedesignUrl,
       startedAt,
       sandboxName: sandbox.name,
+      businessId: dbRecord.businessId,
       runId: dbRecord.runId,
     });
     await uploadRunner(sandbox);
@@ -438,6 +499,44 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
     if (sandbox) console.error(`Sandbox left running for inspection: ${sandbox.name}`);
     throw error;
   }
+}
+
+export async function deleteWebsite(slugInput: string): Promise<DeleteWebsiteResult> {
+  const slug = normalizeSlug(slugInput);
+  const website = await getWebsite(slug);
+  if (!website) throw new Error(`Website not found: ${slug}`);
+
+  const repo = await deleteGithubRepo(website.repoUrl, slug);
+  const vercelProject = await deleteVercelProject(slug);
+  const deletedRecord = await deleteWebsiteRecord(slug);
+  return { slug, repo, vercelProject, deletedRecord };
+}
+
+export async function backfillBusinessContacts() {
+  const businesses = await listBusinessesForContactBackfill();
+  const results: Array<{ slug: string; email?: string; contactFormUrl?: string; error?: string }> = [];
+
+  for (let offset = 0; offset < businesses.length; offset += 5) {
+    const batch = businesses.slice(offset, offset + 5);
+    results.push(...await Promise.all(batch.map(async (business) => {
+      try {
+        const found = await collectContactInfo(business.website);
+        const contactInfo = {
+          email: business.email ? undefined : found.email,
+          contactFormUrl: business.contactFormUrl ? undefined : found.contactFormUrl,
+        };
+        await updateBusinessContactInfo(business.id, contactInfo);
+        console.log(`${business.slug}: ${contactInfo.email ?? "no email"}; ${contactInfo.contactFormUrl ?? "no contact form"}`);
+        return { slug: business.slug, ...contactInfo };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`${business.slug}: ${message}`);
+        return { slug: business.slug, error: message };
+      }
+    })));
+  }
+
+  return results;
 }
 
 export async function cleanupSandbox(sandboxName: string) {
