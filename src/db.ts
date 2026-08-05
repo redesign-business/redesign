@@ -30,6 +30,43 @@ export type BusinessSeed = {
   reviewCount?: number | null;
 };
 
+export type DiscoveredBusinessSeed = {
+  googlePlaceId: string;
+  googleBusinessStatus?: string | null;
+  name: string;
+  slug: string;
+  website?: string | null;
+  address?: string | null;
+};
+
+export type DiscoveredBusinessRecord = {
+  id: string;
+  name: string;
+  website: string | null;
+  googleBusinessStatus: string | null;
+  email: string | null;
+  emailVerificationStatus: string | null;
+  emailCatchAll: boolean | null;
+  contactFormUrl: string | null;
+  contactCheckedAt: string | null;
+};
+
+export type DiscoveryFunnelRow = {
+  category: string | null;
+  area: string | null;
+  total: number;
+  withWebsite: number;
+  verifiedEmail: number;
+  verifiedCatchAll: number;
+  contactForm: number;
+  contactable: number;
+  invalidEmail: number;
+  websitePercent: number;
+  verifiedEmailPercent: number;
+  contactFormPercent: number;
+  contactablePercent: number;
+};
+
 export type BusinessContactRecord = {
   id: string;
   name: string;
@@ -37,6 +74,28 @@ export type BusinessContactRecord = {
   website: string;
   email: string | null;
   contactFormUrl: string | null;
+};
+
+export type RedesignCandidateRecord = {
+  id: string;
+  name: string;
+  slug: string;
+  website: string;
+  email: string;
+};
+
+export type ExistingRedesignRecord = {
+  sourceUrl: string;
+  slug: string;
+  email: string | null;
+};
+
+export type RunCompletionRecord = {
+  status: string;
+  endedAt: string | null;
+  error: string | null;
+  totalCost: number | null;
+  redesignUrl: string | null;
 };
 
 export type WebsiteSeed = {
@@ -93,12 +152,36 @@ export async function ensureSchema() {
         address text,
         rating numeric,
         review_count integer,
+        google_place_id text,
+        google_business_status text,
+        email_verification_status text,
+        email_catch_all boolean,
+        contact_checked_at timestamptz,
         created_at timestamptz not null default now(),
         updated_at timestamptz not null default now()
       )
     `;
     await db`alter table businesses add column if not exists email text`;
     await db`alter table businesses add column if not exists contact_form_url text`;
+    await db`alter table businesses add column if not exists google_place_id text`;
+    await db`alter table businesses add column if not exists google_business_status text`;
+    await db`alter table businesses add column if not exists email_verification_status text`;
+    await db`alter table businesses add column if not exists email_catch_all boolean`;
+    await db`alter table businesses add column if not exists contact_checked_at timestamptz`;
+    await db`
+      create unique index if not exists businesses_google_place_id_idx
+      on businesses (google_place_id)
+      where google_place_id is not null
+    `;
+    await db`
+      create table if not exists business_discoveries (
+        business_id text not null references businesses(id) on delete cascade,
+        category text not null,
+        area text not null,
+        discovered_at timestamptz not null default now(),
+        primary key (business_id, category, area)
+      )
+    `;
     await db`
       create table if not exists websites (
         id text primary key,
@@ -193,6 +276,147 @@ export async function upsertBusiness(input: BusinessSeed): Promise<string> {
   return String(business.id);
 }
 
+export async function upsertDiscoveredBusiness(input: DiscoveredBusinessSeed): Promise<DiscoveredBusinessRecord> {
+  await ensureSchema();
+  const [business] = await sql()`
+    insert into businesses (id, name, slug, website, address, google_place_id, google_business_status)
+    values (
+      ${id("biz")},
+      ${input.name},
+      ${input.slug},
+      ${input.website ?? null},
+      ${input.address ?? null},
+      ${input.googlePlaceId},
+      ${input.googleBusinessStatus ?? null}
+    )
+    on conflict (google_place_id) where google_place_id is not null do update set
+      name = excluded.name,
+      website = coalesce(excluded.website, businesses.website),
+      address = coalesce(excluded.address, businesses.address),
+      google_business_status = excluded.google_business_status,
+      updated_at = now()
+    returning id, name, website, google_business_status, email, email_verification_status, email_catch_all, contact_form_url, contact_checked_at
+  ` as Row[];
+  return {
+    id: String(business.id),
+    name: String(business.name),
+    website: business.website === null ? null : String(business.website),
+    googleBusinessStatus: business.google_business_status === null ? null : String(business.google_business_status),
+    email: business.email === null ? null : String(business.email),
+    emailVerificationStatus: business.email_verification_status === null ? null : String(business.email_verification_status),
+    emailCatchAll: business.email_catch_all === null ? null : Boolean(business.email_catch_all),
+    contactFormUrl: business.contact_form_url === null ? null : String(business.contact_form_url),
+    contactCheckedAt: business.contact_checked_at === null ? null : new Date(String(business.contact_checked_at)).toISOString(),
+  };
+}
+
+export async function listBusinessesForDiscoveryQualification(): Promise<DiscoveredBusinessRecord[]> {
+  await ensureSchema();
+  const rows = await sql()`
+    select distinct b.id, b.name, b.website, b.google_business_status, b.email,
+      b.email_verification_status, b.email_catch_all, b.contact_form_url, b.contact_checked_at
+    from businesses b
+    join business_discoveries d on d.business_id = b.id
+    where b.website is not null
+      and b.google_business_status is distinct from 'CLOSED_PERMANENTLY'
+      and (b.contact_checked_at is null or b.email_verification_status = 'pending')
+    order by b.name
+  ` as Row[];
+  return rows.map((business) => ({
+    id: String(business.id),
+    name: String(business.name),
+    website: String(business.website),
+    googleBusinessStatus: business.google_business_status === null ? null : String(business.google_business_status),
+    email: business.email === null ? null : String(business.email),
+    emailVerificationStatus: business.email_verification_status === null ? null : String(business.email_verification_status),
+    emailCatchAll: business.email_catch_all === null ? null : Boolean(business.email_catch_all),
+    contactFormUrl: business.contact_form_url === null ? null : String(business.contact_form_url),
+    contactCheckedAt: business.contact_checked_at === null ? null : new Date(String(business.contact_checked_at)).toISOString(),
+  }));
+}
+
+export async function recordBusinessDiscovery(businessId: string, category: string, area: string): Promise<void> {
+  await ensureSchema();
+  await sql()`
+    insert into business_discoveries (business_id, category, area)
+    values (${businessId}, ${category}, ${area})
+    on conflict do nothing
+  `;
+}
+
+export async function listDiscoveryFunnel(): Promise<DiscoveryFunnelRow[]> {
+  await ensureSchema();
+  const rows = await sql()`
+    select
+      case when grouping(d.category) = 0 then d.category end as category,
+      case when grouping(d.area) = 0 then d.area end as area,
+      count(distinct b.id) as total,
+      count(distinct b.id) filter (where b.website is not null) as with_website,
+      count(distinct b.id) filter (where b.email_verification_status = 'verified') as verified_email,
+      count(distinct b.id) filter (where b.email_verification_status = 'verified' and b.email_catch_all is true) as verified_catch_all,
+      count(distinct b.id) filter (where b.contact_form_url is not null) as contact_form,
+      count(distinct b.id) filter (
+        where b.email_verification_status = 'verified' or b.contact_form_url is not null
+      ) as contactable,
+      count(distinct b.id) filter (where b.email_verification_status = 'invalid') as invalid_email
+    from business_discoveries d
+    join businesses b on b.id = d.business_id
+    group by grouping sets ((), (d.category), (d.area), (d.category, d.area))
+    order by category nulls first, area nulls first
+  ` as Row[];
+  return rows.map((row) => {
+    const total = Number(row.total);
+    const contactable = Number(row.contactable);
+    const percent = (count: number) => total === 0 ? 0 : Math.round((count / total) * 1_000) / 10;
+    const withWebsite = Number(row.with_website);
+    const verifiedEmail = Number(row.verified_email);
+    const contactForm = Number(row.contact_form);
+    return {
+      category: row.category === null ? null : String(row.category),
+      area: row.area === null ? null : String(row.area),
+      total,
+      withWebsite,
+      verifiedEmail,
+      verifiedCatchAll: Number(row.verified_catch_all),
+      contactForm,
+      contactable,
+      invalidEmail: Number(row.invalid_email),
+      websitePercent: percent(withWebsite),
+      verifiedEmailPercent: percent(verifiedEmail),
+      contactFormPercent: percent(contactForm),
+      contactablePercent: percent(contactable),
+    };
+  });
+}
+
+export async function updateBusinessDiscoveryContactInfo(
+  businessId: string,
+  input: {
+    email?: string;
+    contactFormUrl?: string;
+    emailVerificationStatus?: string;
+    emailCatchAll?: boolean | null;
+  },
+): Promise<void> {
+  await ensureSchema();
+  await sql()`
+    update businesses set
+      email = coalesce(${input.email ?? null}, email),
+      contact_form_url = coalesce(${input.contactFormUrl ?? null}, contact_form_url),
+      email_verification_status = case
+        when ${input.email !== undefined} then ${input.emailVerificationStatus ?? null}
+        else email_verification_status
+      end,
+      email_catch_all = case
+        when ${input.email !== undefined} then ${input.emailCatchAll ?? null}
+        else email_catch_all
+      end,
+      contact_checked_at = now(),
+      updated_at = now()
+    where id = ${businessId}
+  `;
+}
+
 export async function updateBusinessContactInfo(
   businessId: string,
   input: Pick<BusinessSeed, "email" | "contactFormUrl">,
@@ -225,6 +449,65 @@ export async function listBusinessesForContactBackfill(): Promise<BusinessContac
     email: row.email === null ? null : String(row.email),
     contactFormUrl: row.contact_form_url === null ? null : String(row.contact_form_url),
   }));
+}
+
+export async function listRedesignCandidates(): Promise<RedesignCandidateRecord[]> {
+  await ensureSchema();
+  const rows = await sql()`
+    select b.id, b.name, b.slug, b.website, b.email
+    from businesses b
+    where b.website is not null
+      and b.email is not null
+      and b.email_verification_status = 'verified'
+      and b.google_business_status is distinct from 'CLOSED_PERMANENTLY'
+      and exists (select 1 from business_discoveries d where d.business_id = b.id)
+    order by md5(b.id)
+  ` as Row[];
+  return rows.map((row) => ({
+    id: String(row.id),
+    name: String(row.name),
+    slug: String(row.slug),
+    website: String(row.website),
+    email: String(row.email),
+  }));
+}
+
+export async function listExistingRedesigns(): Promise<ExistingRedesignRecord[]> {
+  await ensureSchema();
+  const rows = await sql()`
+    select distinct b.website as source_url, w.slug, b.email
+    from websites w
+    join businesses b on b.id = w.business_id
+    where b.website is not null
+      and exists (
+        select 1 from runs r
+        where r.website_id = w.id and r.status <> 'failed'
+      )
+  ` as Row[];
+  return rows.map((row) => ({
+    sourceUrl: String(row.source_url),
+    slug: String(row.slug),
+    email: row.email === null ? null : String(row.email),
+  }));
+}
+
+export async function getRunCompletion(runId: string): Promise<RunCompletionRecord | undefined> {
+  await ensureSchema();
+  const [row] = await sql()`
+    select r.status, r.ended_at, r.error, r.total_cost, w.url as redesign_url
+    from runs r
+    join websites w on w.id = r.website_id
+    where r.id = ${runId}
+    limit 1
+  ` as Row[];
+  if (!row) return undefined;
+  return {
+    status: String(row.status),
+    endedAt: row.ended_at === null ? null : new Date(String(row.ended_at)).toISOString(),
+    error: row.error === null ? null : String(row.error),
+    totalCost: row.total_cost === null ? null : Number(row.total_cost),
+    redesignUrl: row.redesign_url === null ? null : String(row.redesign_url),
+  };
 }
 
 export async function upsertWebsite(input: WebsiteSeed): Promise<string> {

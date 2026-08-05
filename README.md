@@ -17,6 +17,8 @@ Fill in:
 - `VERCEL_TOKEN`: token the app uses to create a budgeted AI Gateway key for each job, and that OpenCode can use for the final intentional Vercel deploy.
 - `VERCEL_TEAM_ID`: recommended when the Gateway and deployments live under a Vercel team.
 - `DATABASE_URL`: hosted Postgres URL for tracking businesses, websites, and runs.
+- `GOOGLE_MAPS_API_KEY`: key with Places API (New) and Geocoding API enabled.
+- `INSTANTLY_API_KEY`: Instantly API v2 key used only to verify discovered email addresses.
 - `NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN`: optional PostHog project token. When set, every generated landing page gets PostHog tracking.
 - `NEXT_PUBLIC_POSTHOG_HOST`: optional PostHog host. Defaults to `https://us.i.posthog.com`.
 
@@ -51,6 +53,38 @@ npm run redesign -- https://example-business.com --business "Example Plumbing" -
 The command creates the GitHub repo, AI Gateway key, and Vercel Sandbox, uploads the cloud runner, starts it in a sandbox tmux session, then attaches your terminal to that session.
 
 Started redesigns are tracked in Postgres. The first run creates the `businesses`, `websites`, and `runs` tables if they do not exist.
+
+## Discover Businesses
+
+```bash
+npm run discover -- --category "custom home builders" --area "Reno, Nevada"
+```
+
+The command searches the area's Google Places results, subdividing dense areas that hit Google's 60-result limit. It stores every returned business by Google place ID, checks business websites for a public email or contact form, and asks Instantly to verify emails. Verified catch-all addresses remain eligible; invalid addresses do not.
+
+Discovery stops after qualification. It does not start a redesign or add anyone to the live Instantly campaign.
+
+Run the agreed 19-category by 9-area discovery matrix:
+
+```bash
+npm run discover-matrix
+```
+
+The matrix stores each unique business once and records every category/area search in which it appeared. It qualifies overlapping businesses only once, then reports the overall funnel and the funnel grouped by category, area, and exact combination: total businesses, websites, verified emails, catch-all emails, contact forms, invalid emails, and businesses contactable by either email or form.
+
+If qualification is interrupted after discovery completes, resume it without repeating Google searches:
+
+```bash
+npm run qualify-discovered
+```
+
+Generate the next 100 high-confidence redesigns in parallel:
+
+```bash
+npm run redesign-batch -- --limit 100 --concurrency 100
+```
+
+The batch groups Google listings by normalized website, keeps one verified same-domain recipient per website, excludes previously redesigned websites, and launches one job per second until all concurrency slots are active. Each job keeps its own `$1` AI Gateway ceiling and releases its sandbox when it finishes.
 
 ## Delete a Website
 

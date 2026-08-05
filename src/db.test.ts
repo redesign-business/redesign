@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { config as loadEnv } from "dotenv";
 import { neon } from "@neondatabase/serverless";
-import { deleteWebsiteRecord, listBusinesses, recordStartedRedesign, replaceRunSessions, updateBusinessContactInfo, updateRunData, upsertRun } from "./db.js";
+import { deleteWebsiteRecord, listBusinesses, listDiscoveryFunnel, recordBusinessDiscovery, recordStartedRedesign, replaceRunSessions, updateBusinessContactInfo, updateBusinessDiscoveryContactInfo, updateRunData, upsertDiscoveredBusiness, upsertRun } from "./db.js";
 
 loadEnv({ path: ".env.local", quiet: true });
 
@@ -15,8 +15,54 @@ if (!process.env.DATABASE_URL) {
   const websiteSlug = `test-website-${suffix}`;
   const secondWebsiteSlug = `test-website-2-${suffix}`;
   const sandbox = `test-sandbox-${suffix}`;
+  const placeId = `test-place-${suffix}`;
 
   try {
+    const discovered = await upsertDiscoveredBusiness({
+      googlePlaceId: placeId,
+      googleBusinessStatus: "OPERATIONAL",
+      name: "Discovered Test Business",
+      slug: `discovered-${suffix}`,
+      website: "https://discovered.example.test/",
+      address: "123 Test Street",
+    });
+    await updateBusinessDiscoveryContactInfo(discovered.id, {
+      email: "hello@discovered.example.test",
+      contactFormUrl: "https://discovered.example.test/contact",
+      emailVerificationStatus: "verified",
+      emailCatchAll: true,
+    });
+    const testCategory = `test-category-${suffix}`;
+    const testArea = `test-area-${suffix}`;
+    await recordBusinessDiscovery(discovered.id, testCategory, testArea);
+    await recordBusinessDiscovery(discovered.id, testCategory, `${testArea}-overlap`);
+    const [discoveredRow] = await db`
+      select google_place_id, email_verification_status, email_catch_all
+      from businesses
+      where id = ${discovered.id}
+    `;
+    assert.deepEqual(discoveredRow, {
+      google_place_id: placeId,
+      email_verification_status: "verified",
+      email_catch_all: true,
+    });
+    const funnel = await listDiscoveryFunnel();
+    assert.deepEqual(funnel.find((row) => row.category === testCategory && row.area === testArea), {
+      category: testCategory,
+      area: testArea,
+      total: 1,
+      withWebsite: 1,
+      verifiedEmail: 1,
+      verifiedCatchAll: 1,
+      contactForm: 1,
+      contactable: 1,
+      invalidEmail: 0,
+      websitePercent: 100,
+      verifiedEmailPercent: 100,
+      contactFormPercent: 100,
+      contactablePercent: 100,
+    });
+
     const first = await recordStartedRedesign({
       businessName: "Test Business",
       businessSlug,
@@ -160,6 +206,7 @@ if (!process.env.DATABASE_URL) {
     }, { websites: 0, runs: 0, sessions: 0 });
 
   } finally {
+    await db`delete from businesses where google_place_id = ${placeId}`;
     await db`
       delete from runs
       where website_id in (

@@ -5,11 +5,15 @@
   "type": "module",
   "scripts": {
     "redesign": "tsx src/cli.ts redesign",
+    "redesign-batch": "tsx src/cli.ts redesign-batch",
     "backfill-contacts": "tsx src/cli.ts backfill-contacts",
+    "discover": "tsx src/cli.ts discover",
+    "discover-matrix": "tsx src/cli.ts discover-matrix",
+    "qualify-discovered": "tsx src/cli.ts qualify-discovered",
     "delete": "tsx src/cli.ts delete",
     "attach": "tsx src/cli.ts attach",
     "stop": "tsx src/cli.ts stop",
-    "test": "tsx src/redesign.test.ts && tsx src/db.test.ts",
+    "test": "tsx src/redesign.test.ts && tsx src/discovery.test.ts && tsx src/db.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

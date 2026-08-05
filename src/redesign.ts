@@ -4,7 +4,19 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { config as loadEnv } from "dotenv";
 import { Sandbox } from "@vercel/sandbox";
-import { deleteWebsiteRecord, getWebsite, listBusinessesForContactBackfill, recordStartedRedesign, updateBusinessContactInfo } from "./db.js";
+import {
+  deleteWebsiteRecord,
+  getRunCompletion,
+  getWebsite,
+  listBusinessesForContactBackfill,
+  listExistingRedesigns,
+  listRedesignCandidates,
+  recordStartedRedesign,
+  updateBusinessContactInfo,
+  type ExistingRedesignRecord,
+  type RedesignCandidateRecord,
+} from "./db.js";
+import { runPool } from "./discovery.js";
 import { collectContactInfo } from "./research.js";
 
 loadEnv({ path: ".env.local", quiet: true });
@@ -15,6 +27,7 @@ export type RedesignOptions = {
   businessSlug?: string;
   slug?: string;
   timeoutMinutes?: number;
+  attach?: boolean;
 };
 
 export type RedesignResult = {
@@ -40,6 +53,17 @@ export type DeleteWebsiteResult = {
   deletedRecord: boolean;
 };
 
+export type SelectedRedesignCandidate = RedesignCandidateRecord & {
+  redesignSlug: string;
+};
+
+export type RedesignBatchOptions = {
+  limit?: number;
+  concurrency?: number;
+  launchIntervalMs?: number;
+  timeoutMinutes?: number;
+};
+
 const WORKDIR = "/vercel/sandbox";
 const TMUX_SESSION = "redesign";
 const DEFAULT_RESEARCH_MODEL = "deepseek/deepseek-v4-flash-0731";
@@ -50,6 +74,7 @@ const DEFAULT_BASE_DOMAIN = "redesign.business";
 const DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com";
 const DEFAULT_AI_GATEWAY_BUDGET = 1;
 const SANDBOX_CLI_VERSION = "3.5.5";
+const BLOCKED_MAILBOX = /^(?:privacy|legal|abuse|careers?|jobs?|employment|hr|billing|accounts?|accessibility|webmaster|no-?reply|do-?not-?reply|support|customer-?service|communications?|media|press|marketing|reservations?)$/i;
 
 export function parseArgs(argv: string[]) {
   const args = new Map<string, string>();
@@ -94,6 +119,38 @@ export function slugFromUrl(site: string) {
   const labels = host.split(".");
   const domainWithoutTld = labels.length > 1 ? labels.slice(0, -1).join(".") : host;
   return domainWithoutTld.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+export function websiteHost(site: string) {
+  return new URL(site).hostname.toLowerCase().replace(/^www\./, "");
+}
+
+export function selectRedesignCandidates(
+  candidates: RedesignCandidateRecord[],
+  existing: ExistingRedesignRecord[],
+  limit: number,
+): SelectedRedesignCandidate[] {
+  const usedHosts = new Set(existing.map(({ sourceUrl }) => websiteHost(sourceUrl)));
+  const usedEmails = new Set(existing.flatMap(({ email }) => email ? [email.toLowerCase()] : []));
+  const usedSlugs = new Set(existing.map(({ slug }) => slug));
+  const selected: SelectedRedesignCandidate[] = [];
+
+  for (const candidate of candidates) {
+    if (selected.length >= limit) break;
+    const host = websiteHost(candidate.website);
+    const email = candidate.email.toLowerCase();
+    const [mailbox = "", emailDomain = ""] = email.split("@");
+    const sameDomain = host === emailDomain || host.endsWith(`.${emailDomain}`) || emailDomain.endsWith(`.${host}`);
+    const redesignSlug = slugFromUrl(candidate.website);
+    if (!sameDomain || BLOCKED_MAILBOX.test(mailbox)) continue;
+    if (usedHosts.has(host) || usedEmails.has(email) || usedSlugs.has(redesignSlug)) continue;
+    usedHosts.add(host);
+    usedEmails.add(email);
+    usedSlugs.add(redesignSlug);
+    selected.push({ ...candidate, redesignSlug });
+  }
+
+  return selected;
 }
 
 export function normalizeSlug(slug: string) {
@@ -491,14 +548,104 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
     };
 
     console.log(JSON.stringify(result, null, 2));
-    console.log(`\nReattach later: npm run attach -- --sandbox ${sandbox.name}\n`);
-    await attachToSandbox(sandbox.name);
+    if (options.attach !== false) {
+      console.log(`\nReattach later: npm run attach -- --sandbox ${sandbox.name}\n`);
+      await attachToSandbox(sandbox.name);
+    }
     return result;
   } catch (error) {
     if (!runnerStarted) await deleteAiGatewayKey(aiGatewayKey.id);
     if (sandbox) console.error(`Sandbox left running for inspection: ${sandbox.name}`);
     throw error;
   }
+}
+
+async function waitForRunCompletion(runId: string, timeoutMinutes: number) {
+  const deadline = Date.now() + timeoutMinutes * 60_000;
+  while (Date.now() < deadline) {
+    const run = await getRunCompletion(runId);
+    if (run?.endedAt) return run;
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+  }
+  throw new Error(`Run ${runId} did not finish within ${timeoutMinutes} minutes`);
+}
+
+export async function runRedesignBatch(options: RedesignBatchOptions = {}) {
+  const limit = options.limit ?? 100;
+  const concurrency = options.concurrency ?? 100;
+  const launchIntervalMs = options.launchIntervalMs ?? 1_000;
+  const timeoutMinutes = options.timeoutMinutes ?? 90;
+  if (!Number.isInteger(limit) || limit < 1) throw new Error("Batch limit must be a positive integer");
+  if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error("Batch concurrency must be a positive integer");
+  if (!Number.isFinite(launchIntervalMs) || launchIntervalMs < 0) throw new Error("Launch interval must be zero or greater");
+
+  const selected = selectRedesignCandidates(
+    await listRedesignCandidates(),
+    await listExistingRedesigns(),
+    limit,
+  );
+  if (selected.length < limit) console.warn(`Selected ${selected.length}/${limit} eligible businesses`);
+
+  const startedAt = Date.now();
+  const results: Array<{
+    business: string;
+    email: string;
+    sourceUrl: string;
+    redesignUrl?: string;
+    status: string;
+    totalCost?: number;
+    error?: string;
+  }> = [];
+  let completed = 0;
+
+  await runPool(selected.map((candidate, index) => ({ candidate, index })), concurrency, async ({ candidate, index }) => {
+    const launchAt = startedAt + index * launchIntervalMs;
+    if (launchAt > Date.now()) await new Promise((resolve) => setTimeout(resolve, launchAt - Date.now()));
+    let sandbox: string | undefined;
+    try {
+      const job = await runRedesign({
+        site: candidate.website,
+        business: candidate.name,
+        businessSlug: candidate.slug,
+        slug: candidate.redesignSlug,
+        timeoutMinutes,
+        attach: false,
+      });
+      sandbox = job.sandbox;
+      const run = await waitForRunCompletion(job.runId, timeoutMinutes + 5);
+      results.push({
+        business: candidate.name,
+        email: candidate.email,
+        sourceUrl: candidate.website,
+        redesignUrl: run.redesignUrl ?? job.expectedRedesignUrl,
+        status: run.status,
+        totalCost: run.totalCost ?? undefined,
+        error: run.error ?? undefined,
+      });
+    } catch (error) {
+      results.push({
+        business: candidate.name,
+        email: candidate.email,
+        sourceUrl: candidate.website,
+        status: "failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      if (sandbox) await cleanupSandbox(sandbox).catch(() => {});
+      completed += 1;
+      console.log(`Batch completed ${completed}/${selected.length}`);
+    }
+  });
+
+  return {
+    requested: limit,
+    selected: selected.length,
+    concurrency,
+    succeeded: results.filter(({ status }) => status === "succeeded").length,
+    failed: results.filter(({ status }) => status !== "succeeded").length,
+    totalCost: results.reduce((sum, result) => sum + (result.totalCost ?? 0), 0),
+    results,
+  };
 }
 
 export async function deleteWebsite(slugInput: string): Promise<DeleteWebsiteResult> {

@@ -49,7 +49,7 @@ const turndown = new TurndownService({
 });
 
 export async function collectResearch(site: string, workdir: string): Promise<{ files: ResearchFile[]; contactInfo: ContactInfo }> {
-  const { pages, imageCandidates, contactInfo } = await crawlSite(site);
+  const { pages, imageCandidates, contactInfo } = await crawlSite(site, maxPages, true);
   const images = await downloadImages(dedupeImages(imageCandidates));
   return {
     contactInfo,
@@ -71,10 +71,11 @@ export async function collectResearch(site: string, workdir: string): Promise<{ 
 }
 
 export async function collectContactInfo(site: string): Promise<ContactInfo> {
-  return (await crawlSite(site)).contactInfo;
+  // ponytail: five pages covers the homepage and prioritized contact links; increase only if misses become measurable.
+  return (await crawlSite(site, 5, false)).contactInfo;
 }
 
-async function crawlSite(site: string) {
+async function crawlSite(site: string, pageLimit: number, collectAssets: boolean) {
   let origin = new URL(site).origin;
   const seen = new Set<string>();
   const queue = [site];
@@ -83,7 +84,7 @@ async function crawlSite(site: string) {
   let email: string | undefined;
   let contactFormUrl: string | undefined;
 
-  while (queue.length && pages.length < maxPages) {
+  while (queue.length && pages.length < pageLimit) {
     const url = queue.shift();
     if (!url || seen.has(url)) continue;
     seen.add(url);
@@ -94,7 +95,7 @@ async function crawlSite(site: string) {
     seen.add(pageUrl);
     if (pages.length === 0) origin = new URL(pageUrl).origin;
 
-    const page = htmlToMarkdown(pageUrl, html);
+    const page = collectAssets ? htmlToMarkdown(pageUrl, html) : { url: pageUrl, title: "", markdown: "" };
     pages.push(page);
 
     const $ = cheerio.load(html);
@@ -102,14 +103,15 @@ async function crawlSite(site: string) {
     const contact = inspectContactInfo($, pageUrl);
     email ??= contact.email;
     contactFormUrl ??= contact.contactFormUrl;
+    if (!collectAssets && email && contactFormUrl) break;
     const links = sameDomainLinks($, pageUrl, origin)
       .sort((left, right) => Number(!hasContactIntent(left)) - Number(!hasContactIntent(right)));
     for (const href of links) {
-      if (!seen.has(href) && !queue.includes(href) && pages.length + queue.length < maxPages) {
+      if (!seen.has(href) && !queue.includes(href) && pages.length + queue.length < pageLimit) {
         queue.push(href);
       }
     }
-    imageCandidates.push(...imageUrls($, pageUrl, page.title).slice(0, maxImagesPerPage));
+    if (collectAssets) imageCandidates.push(...imageUrls($, pageUrl, page.title).slice(0, maxImagesPerPage));
   }
 
   return { pages, imageCandidates, contactInfo: { email, contactFormUrl } };

@@ -1,10 +1,15 @@
-import { attachToSandbox, backfillBusinessContacts, cleanupSandbox, deleteWebsite, parseArgs, readRequired, runRedesign } from "./redesign.js";
+import { attachToSandbox, backfillBusinessContacts, cleanupSandbox, deleteWebsite, parseArgs, readRequired, runRedesign, runRedesignBatch } from "./redesign.js";
+import { discoverBusinessMatrix, discoverBusinesses, qualifyDiscoveredBusinesses } from "./discovery.js";
 
 const [cmd = "help", ...rest] = process.argv.slice(2);
 const usage = [
   "Usage:",
   "  npm run redesign -- <url> [--slug <slug>] [--business <name>] [--business-slug <slug>]",
+  "  npm run redesign-batch -- [--limit <count>] [--concurrency <count>] [--launch-interval-ms <milliseconds>]",
   "  npm run backfill-contacts",
+  "  npm run discover -- --category <category> --area <area>",
+  "  npm run discover-matrix",
+  "  npm run qualify-discovered",
   "  npm run delete -- --slug <slug>",
   "  npm run attach -- --sandbox <sandbox>",
   "  npm run stop -- --sandbox <sandbox>",
@@ -29,6 +34,13 @@ try {
       slug: args.get("slug"),
       timeoutMinutes: args.has("timeout") ? Number(args.get("timeout")) : undefined,
     });
+  } else if (cmd === "redesign-batch") {
+    console.log(JSON.stringify(await runRedesignBatch({
+      limit: args.has("limit") ? Number(args.get("limit")) : undefined,
+      concurrency: args.has("concurrency") ? Number(args.get("concurrency")) : undefined,
+      launchIntervalMs: args.has("launch-interval-ms") ? Number(args.get("launch-interval-ms")) : undefined,
+      timeoutMinutes: args.has("timeout") ? Number(args.get("timeout")) : undefined,
+    }), null, 2));
   } else if (cmd === "attach") {
     const sandbox = args.get("sandbox") ?? positional[0];
     if (!sandbox) throw new Error("Missing --sandbox");
@@ -40,6 +52,12 @@ try {
     const results = await backfillBusinessContacts();
     const failed = results.filter((result) => result.error).length;
     console.log(`Backfilled ${results.length - failed}/${results.length} businesses; ${failed} failed.`);
+  } else if (cmd === "discover") {
+    console.log(JSON.stringify(await discoverBusinesses(readRequired(args, "category"), readRequired(args, "area")), null, 2));
+  } else if (cmd === "discover-matrix") {
+    console.log(JSON.stringify(await discoverBusinessMatrix(), null, 2));
+  } else if (cmd === "qualify-discovered") {
+    console.log(JSON.stringify(await qualifyDiscoveredBusinesses(), null, 2));
   } else if (cmd === "stop") {
     await cleanupSandbox(readRequired(args, "sandbox"));
     console.log("Sandbox deleted.");

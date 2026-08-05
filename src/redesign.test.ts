@@ -9,7 +9,9 @@ import {
   parseArgs,
   postHogPublicEnv,
   readRequired,
+  selectRedesignCandidates,
   slugFromUrl,
+  websiteHost,
 } from "./redesign.js";
 import { extractContactInfo, normalizeSameDomainUrl, parseSrcset } from "./research.js";
 
@@ -23,13 +25,26 @@ assert.equal(parsed.args.get("slug"), "Acme Plumbing");
 assert.throws(() => parseArgs(["--slug"]), /Missing value/);
 assert.equal(readRequired(parsed.args, "slug"), "Acme Plumbing");
 assert.throws(() => readRequired(parsed.args, "sandbox"), /Missing --sandbox/);
-
 assert.equal(normalizeHttpUrl("acme.test"), "https://acme.test/");
 assert.equal(slugFromUrl("https://www.Acme-Plumbing.com/services"), "acme-plumbing");
 assert.equal(slugFromUrl("https://jobs.Acme-Plumbing.com/services"), "jobs-acme-plumbing");
+assert.equal(websiteHost("https://www.Acme-Plumbing.com/services"), "acme-plumbing.com");
 assert.equal(normalizeSlug("Acme Plumbing"), "acme-plumbing");
 assert.throws(() => normalizeSlug("-"), /Invalid slug/);
 assert.match(makeSandboxName("acme"), /^redesign-acme-[a-f0-9]{8}$/);
+
+const selectedCandidates = selectRedesignCandidates([
+  { id: "1", name: "Acme", slug: "acme", website: "https://www.acme.test/", email: "hello@acme.test" },
+  { id: "2", name: "Acme Location", slug: "acme-location", website: "https://acme.test/location", email: "office@acme.test" },
+  { id: "3", name: "Beta", slug: "beta", website: "https://beta.test/", email: "privacy@beta.test" },
+  { id: "4", name: "Gamma", slug: "gamma", website: "https://gamma.test/", email: "hello@gamma.test" },
+  { id: "5", name: "Delta", slug: "delta", website: "https://delta.test/", email: "info@delta.test" },
+  { id: "6", name: "Other", slug: "other", website: "https://other.test/", email: "info@unrelated.test" },
+], [{ sourceUrl: "https://gamma.test/", slug: "gamma", email: "hello@gamma.test" }], 100);
+assert.deepEqual(selectedCandidates.map(({ name, redesignSlug }) => ({ name, redesignSlug })), [
+  { name: "Acme", redesignSlug: "acme" },
+  { name: "Delta", redesignSlug: "delta" },
+]);
 assert.deepEqual(githubRepoFromUrl("https://github.com/redesign-business/acme", "fallback"), {
   owner: "redesign-business",
   repo: "acme",

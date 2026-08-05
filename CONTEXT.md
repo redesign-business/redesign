@@ -1,15 +1,50 @@
-# Context
+# Redesign
 
-## Glossary
+This context creates improved websites for small businesses and presents the finished work to prospective customers.
 
-- **Redesign job**: one request to improve a small business website in a target GitHub repo.
-- **Run**: one internal generation attempt for a website. Runs are production history, not customer-facing sales activity.
-- **Session**: one model-level usage record for a run, using the same model identifier string as AI Gateway.
-- **Sandbox**: the Vercel Sandbox microVM where OpenCode runs, so local machine resources are not used.
-- **Agent command**: the detached OpenCode process running inside a sandbox.
-- **Website slug**: the stable identifier for one website entity. The GitHub repo, Vercel project, and preferred redesign subdomain all use this slug. It usually comes from the source domain without its top-level domain, so `example.com` becomes `example`; it can differ when one business has multiple websites.
-- **Generated repo**: the GitHub repo created under `redesign-business` for one website redesign.
+## Language
 
-## Current Decision
+**Business**:
+A small business whose public information supplies the source material for a website and whose owner may buy the finished work.
 
-Use OpenCode in Vercel Sandbox with Vercel AI Gateway. The user provides a site URL; the app creates a GitHub repo under `redesign-business`, runs the redesign on `main`, deploys once with the Vercel CLI, prints the original/redesign URLs, and deletes the sandbox on success. Skip orchestration layers until a real need appears.
+**Google listing**:
+A Google Maps entry for a location, practitioner, team, or organization. Several Google listings may describe the same Business.
+
+**Prospect**:
+A business selected for outreach after a redesign preview has been prepared.
+_Avoid_: Lead, account
+
+**Redesign job**:
+One request to create or improve a business website.
+
+**Redesign preview**:
+A deployed website created for a specific business before that business has agreed to buy it.
+_Avoid_: Demo, mockup
+
+**Outreach**:
+A cold email or website contact-form message that presents a redesign preview to a prospect.
+_Avoid_: Sales event, campaign
+
+**Positive reply**:
+A prospect response that expresses interest, offers feedback, or asks about next steps. It is the first success signal, not a sale.
+
+**Sales conversation**:
+The customer-facing exchange that begins after a positive reply and may end in an agreement and payment. It is not part of redesign production history.
+
+**Run**:
+One internal generation attempt for a website. Runs are production history, not customer-facing sales activity.
+
+**Session**:
+One model-usage record within a run.
+
+**Sandbox**:
+The isolated environment in which a run executes.
+
+**Agent command**:
+The detached website-generation process running inside a sandbox.
+
+**Website slug**:
+The stable identifier for one website. It usually comes from the source domain without its top-level domain, so `example.com` becomes `example`, but can differ when one business has multiple websites.
+
+**Generated repo**:
+The source repository containing one redesign preview.
