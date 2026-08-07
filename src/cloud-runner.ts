@@ -108,7 +108,9 @@ function buildImplementationPrompt(hasImageContactSheets: boolean, hasHomepageSc
       : "- The original screenshot was unavailable.",
     "",
     "Output contract:",
-    "- Use the Relume MCP normally to search for, choose, retrieve, and install the best-fitting sections and their required primitives.",
+    "- Search Relume with natural-language descriptions of each content role and composition. Do not guess category slugs. Call list_categories only if natural-language search fails or a tool requires a category.",
+    "- Batch compatible searches when possible. Choose the complete section set from search results before retrieving source.",
+    "- Retrieve all selected section source together in one call, then implement it without rereading the returned source. The template already contains Relume setup, common dependencies, and shared primitives; request or install only something genuinely missing.",
     "- Use Relume components for the page's composition. Do not invent or restructure section layouts; adapt the content to their typed props.",
     "- You may edit app/page.tsx, app/globals.css, app/layout.tsx, files returned by Relume, package.json, and pnpm-lock.yaml.",
     "- Build 5-7 purposeful sections including navigation and footer. Use one CTA consistently.",
@@ -548,25 +550,27 @@ async function main() {
 
   await updateRun({ status: "precollect" });
   await collectResearch();
-  const imageContactSheets = await createBuildAssetPack();
   await commitAll("chore: add scraped research inputs");
-  const hasHomepageScreenshot = await captureHomepageScreenshot();
   await write("/tmp/research-prompt.md", buildResearchPrompt());
 
   await updateRun({ status: "research" });
-  const research = await runOpenCodePhase("research", RESEARCH_MODEL, ["run", "Follow the attached redesign prompt.", "--auto", "--dir", WORKDIR, "--title", `Research ${slug}`, "--agent", RESEARCH_AGENT, "--file", "/tmp/research-prompt.md"], {
-    agent: RESEARCH_AGENT,
-    deliverableDelivered: async () => {
-      try {
-        const proof = await readFile(`${WORKDIR}/proof.md`, "utf8");
-        extractOutreachProof(proof);
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    retryMessage: "Finish proof.md with exactly three Outreach bullets and the complete grounded proof.",
-  });
+  const [research, imageContactSheets, hasHomepageScreenshot] = await Promise.all([
+    runOpenCodePhase("research", RESEARCH_MODEL, ["run", "Follow the attached redesign prompt.", "--auto", "--dir", WORKDIR, "--title", `Research ${slug}`, "--agent", RESEARCH_AGENT, "--file", "/tmp/research-prompt.md"], {
+      agent: RESEARCH_AGENT,
+      deliverableDelivered: async () => {
+        try {
+          const proof = await readFile(`${WORKDIR}/proof.md`, "utf8");
+          extractOutreachProof(proof);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      retryMessage: "Finish proof.md with exactly three Outreach bullets and the complete grounded proof.",
+    }),
+    createBuildAssetPack(),
+    captureHomepageScreenshot(),
+  ]);
   await commitAll("chore: add proof");
 
   await write("/tmp/implementation-prompt.md", buildImplementationPrompt(imageContactSheets.length > 0, hasHomepageScreenshot));
