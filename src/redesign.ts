@@ -497,6 +497,10 @@ async function uploadRunner(sandbox: Sandbox) {
       path: "/tmp/redesign-runner/src/research.ts",
       content: Buffer.from(await readFile(join(process.cwd(), "src", "research.ts"), "utf8")),
     },
+    {
+      path: "/tmp/redesign-runner/src/relume.ts",
+      content: Buffer.from(await readFile(join(process.cwd(), "src", "relume.ts"), "utf8")),
+    },
   ]);
 }
 

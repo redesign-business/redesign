@@ -4,6 +4,7 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { replaceRunSessions, updateBusinessContactInfo, updateRunData } from "./db.js";
 import { phaseComplete, redactSessionOutput } from "./phase.js";
+import { installRelumeComponents, verifyRelumeComponents, type RelumeInstall } from "./relume.js";
 import { collectResearch as collectResearchData, extractOutreachProof } from "./research.js";
 
 type Usage = {
@@ -36,6 +37,7 @@ const RESEARCH_MODEL = "deepseek/deepseek-v4-flash-0731";
 const BUILD_MODEL = "openai/gpt-5.6-sol";
 const REPAIR_MODEL = "deepseek/deepseek-v4-flash-0731";
 const RESEARCH_AGENT = "research";
+const COMPOSE_AGENT = "compose";
 const BUILD_AGENT = "build";
 const REPAIR_AGENT = "repair";
 const HOMEPAGE_SCREENSHOT = "/tmp/original-homepage.png";
@@ -90,9 +92,9 @@ function buildResearchPrompt() {
   ].join("\n");
 }
 
-function buildImplementationPrompt(hasImageContactSheets: boolean, hasHomepageScreenshot: boolean) {
+function buildCompositionPrompt(hasImageContactSheets: boolean, hasHomepageScreenshot: boolean) {
   return [
-    "Build one finished homepage from the supplied evidence.",
+    "Choose the Relume composition for one finished homepage from the supplied evidence.",
     "",
     `Original URL: ${originalUrl}`,
     "",
@@ -107,23 +109,41 @@ function buildImplementationPrompt(hasImageContactSheets: boolean, hasHomepageSc
       ? "- The attached original screenshot is a brand reference, not a layout to copy."
       : "- The original screenshot was unavailable.",
     "",
-    "Output contract:",
+    "Selection contract:",
     "- Search Relume with natural-language descriptions of each content role and composition. Do not guess category slugs. Call list_categories only if natural-language search fails or a tool requires a category.",
     "- Batch compatible searches when possible. Choose the complete section set from search results before retrieving source.",
-    "- Retrieve all selected section source together in one call, then implement it without rereading the returned source. The template already contains Relume setup, common dependencies, and shared primitives; request or install only something genuinely missing.",
-    "- Use Relume components for the page's composition. Do not invent or restructure section layouts; adapt the content to their typed props.",
-    "- You may edit app/page.tsx, app/globals.css, app/layout.tsx, files returned by Relume, package.json, and pnpm-lock.yaml.",
-    "- Build 5-7 purposeful sections including navigation and footer. Use one CTA consistently.",
-    "- Use the strongest proof. Write concise copy that fits the composition. Do not invent claims.",
-    "- Preserve a strong original color or font when present and always use the original logo.",
+    "- Choose 5-7 purposeful components including navigation and footer. Favor simple, static compositions that fit the available proof and images without layout changes.",
     "- Inspect every original-image contact sheet before choosing. Later sheets are equally important; never default to the earliest IDs.",
-    "- Choose images for visual fit with each selected layout. For work or portfolio sections, use the strongest distinct examples of the business's work, not logos, headshots, or decorative images.",
-    "- Use each selected image once and avoid near-duplicate crops of the same scene. Do not use remote placeholders, stock, generated, repeated, or upscaled media.",
     "- Do not add carousels, video players, sticky scroll scenes, scroll-driven layouts, or large empty regions.",
-    "- Make the result responsive and polished at 1440px and mobile widths.",
+    "- Do not call get_components and do not edit the website.",
+    "- Write .redesign/relume-selection.json as exactly one JSON object with one key: `slugs`, containing the selected Relume slugs in page order.",
     "",
-    "Do not create plans or notes, browse the web, build, commit, push, or deploy. Only run pnpm add when Relume requires a dependency.",
-    "You are done after the finished site, selected Relume components, and business metadata are in the project.",
+    "Do not create plans or notes, browse the web, retrieve source, install, build, commit, push, or deploy.",
+    "You are done when .redesign/relume-selection.json exists.",
+  ].join("\n");
+}
+
+function buildImplementationPrompt() {
+  return [
+    "Now build the finished homepage using the exact Relume components installed by code.",
+    "",
+    "The selected component paths and immutable hashes are listed in .redesign/relume-install.json. Their compact prop API is in .redesign/relume-api.md.",
+    "Use that API to compose them in app/page.tsx. Do not read, edit, copy, consolidate, or reimplement any installed component, primitive, hook, or utility.",
+    "",
+    "Implementation contract:",
+    "- Edit only app/page.tsx, app/globals.css, and app/layout.tsx.",
+    "- app/page.tsx supplies section order, typed props, concise grounded copy, original image paths, the original logo, links, and business metadata.",
+    "- app/globals.css may set the existing theme variables and basic element defaults. Do not add named CSS classes; use Tailwind utilities in page.tsx when a page-level wrapper genuinely needs styling.",
+    "- Use one primary color and one neutral palette. Do not add raw colors outside the theme variables.",
+    "- Use the shared Button default variant for every primary CTA. Use one CTA label consistently and do not add CTA-specific styling.",
+    "- Preserve a strong original color or font when present and always use the original logo.",
+    "- Use the strongest proof from proof.md. Adapt copy length to the installed component props and do not invent claims.",
+    "- Choose original images for visual fit. Use each once, avoid near-duplicates, and use the strongest distinct work for portfolio sections.",
+    "- Do not use remote placeholders, stock, generated, repeated, or upscaled media.",
+    "- Keep the selected layouts and interactions intact. If a component is imperfect, populate it faithfully rather than redesigning it.",
+    "",
+    "Make one implementation patch, then stop without rereading or auditing the result. Do not use Relume tools, create plans or notes, browse, install dependencies, build, commit, push, or deploy.",
+    "You are done when app/page.tsx, app/globals.css, and app/layout.tsx form the finished site.",
   ].join("\n");
 }
 
@@ -272,6 +292,39 @@ async function createBuildAssetPack() {
     .filter((name) => /^build-contact-sheet-\d+\.png$/.test(name))
     .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
     .map((name) => `${WORKDIR}/.redesign/${name}`);
+}
+
+async function readRelumeSelection() {
+  const selection = JSON.parse(await readFile(`${WORKDIR}/.redesign/relume-selection.json`, "utf8")) as { slugs?: unknown };
+  if (!Array.isArray(selection.slugs) || selection.slugs.length < 5 || selection.slugs.length > 7) {
+    throw new Error("Relume selection must contain 5-7 slugs");
+  }
+  const slugs = selection.slugs.map(String);
+  if (new Set(slugs).size !== slugs.length || slugs.some((slug) => !/^[a-z0-9_]+$/.test(slug))) {
+    throw new Error("Relume selection contains invalid or duplicate slugs");
+  }
+  return slugs;
+}
+
+function dependencyName(spec: string) {
+  if (!spec.startsWith("@")) return spec.split("@")[0];
+  const versionAt = spec.indexOf("@", 1);
+  return versionAt === -1 ? spec : spec.slice(0, versionAt);
+}
+
+async function installMissingDependencies(dependencies: string[]) {
+  const packageJson = JSON.parse(await readFile(`${WORKDIR}/package.json`, "utf8")) as {
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+  };
+  const present = { ...packageJson.dependencies, ...packageJson.devDependencies };
+  const missing = dependencies.filter((dependency) => !present[dependencyName(dependency)]);
+  if (missing.length) await run("pnpm", ["add", ...missing], { cwd: WORKDIR });
+}
+
+async function validateGlobalStyles() {
+  const css = await readFile(`${WORKDIR}/app/globals.css`, "utf8");
+  if (/(^|[,{}]\s*)\.[A-Za-z_-][\w-]*/m.test(css)) throw new Error("app/globals.css contains named CSS classes; use Tailwind utilities instead");
 }
 
 async function runOpenCodePhase(
@@ -573,22 +626,47 @@ async function main() {
   ]);
   await commitAll("chore: add proof");
 
-  await write("/tmp/implementation-prompt.md", buildImplementationPrompt(imageContactSheets.length > 0, hasHomepageScreenshot));
-
   const proofSentences = extractOutreachProof(await readFile(`${WORKDIR}/proof.md`, "utf8"));
+  await write("/tmp/composition-prompt.md", buildCompositionPrompt(imageContactSheets.length > 0, hasHomepageScreenshot));
+  const compositionArgs = ["run", "Follow the attached composition prompt.", "--auto", "--dir", WORKDIR, "--title", `Compose ${slug}`, "--agent", COMPOSE_AGENT, "--file", "/tmp/composition-prompt.md"];
+  for (const sheet of imageContactSheets) compositionArgs.push("--file", sheet);
+  if (hasHomepageScreenshot) compositionArgs.push("--file", HOMEPAGE_SCREENSHOT);
+  await updateRun({ status: "composition", researchAttempts: research.attempts, proofSentences });
+  const composition = await runOpenCodePhase("composition", BUILD_MODEL, compositionArgs, {
+    agent: COMPOSE_AGENT,
+    deliverableDelivered: async () => {
+      try {
+        await readRelumeSelection();
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    maxContinues: 0,
+  });
+
+  const relumeSlugs = await readRelumeSelection();
+  await run(OPENCODE_BIN, ["mcp", "list"], { cwd: WORKDIR });
+  const relumeInstall: RelumeInstall = await installRelumeComponents(WORKDIR, relumeSlugs);
+  await installMissingDependencies(relumeInstall.dependencies);
+  await commitAll("chore: install selected relume components");
+
+  await write("/tmp/implementation-prompt.md", buildImplementationPrompt());
   const globalsBeforeImplementation = await readFile(`${WORKDIR}/app/globals.css`, "utf8");
-  const implementationArgs = ["run", "Follow the attached implementation prompt.", "--auto", "--dir", WORKDIR, "--title", `Build ${slug}`, "--agent", BUILD_AGENT, "--file", "/tmp/implementation-prompt.md"];
-  for (const sheet of imageContactSheets) implementationArgs.push("--file", sheet);
-  if (hasHomepageScreenshot) implementationArgs.push("--file", HOMEPAGE_SCREENSHOT);
-  await updateRun({ status: "implementation", researchAttempts: research.attempts, proofSentences });
+  const implementationArgs = ["run", "Continue with the attached implementation prompt.", "--continue", "--auto", "--dir", WORKDIR, "--agent", BUILD_AGENT, "--file", "/tmp/implementation-prompt.md"];
+  await updateRun({ status: "implementation", compositionAttempts: composition.attempts, relumeComponents: relumeSlugs });
   const implementation = await runOpenCodePhase("implementation", BUILD_MODEL, implementationArgs, {
     agent: BUILD_AGENT,
     deliverableDelivered: () => implementationDelivered(globalsBeforeImplementation),
     maxContinues: 0,
   });
+  await verifyRelumeComponents(WORKDIR, relumeInstall);
+  await validateGlobalStyles();
 
   await updateRun({ status: "build", implementationAttempts: implementation.attempts });
   const build = await buildWithRepairs();
+  await verifyRelumeComponents(WORKDIR, relumeInstall);
+  await validateGlobalStyles();
 
   await updateRun({ status: "commit", buildCommands: build.builds, repairCommands: build.repairs });
   await commitAll("feat: build landing page");

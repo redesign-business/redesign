@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { businessSummaryFromRow } from "./db.js";
 import { phaseComplete, redactSessionOutput } from "./phase.js";
+import { applyRelumeCompatibility, parseRelumeComponents, relumeComponentApi } from "./relume.js";
 import {
   githubRepoFromUrl,
   makeSandboxName,
@@ -20,6 +21,49 @@ assert.equal(phaseComplete(0), true);
 assert.equal(phaseComplete(0, false), false);
 assert.equal(phaseComplete(1, true), true);
 assert.equal(redactSessionOutput("used secret-token and ok", ["secret-token", "short"]), "used [REDACTED] and ok");
+assert.deepEqual(parseRelumeComponents({ content: [{ type: "text", text: [
+  "// File: Header1.tsx",
+  "```tsx",
+  "export const Header1 = () => null;",
+  "```",
+  "// File: components/ui/accordion.tsx",
+  "```tsx",
+  "export const Accordion = () => null;",
+  "```",
+  "npm i motion@^12.0.0 clsx",
+].join("\n") }] }), {
+  files: [
+    { path: "components/relume/Header1.tsx", content: "export const Header1 = () => null;\n" },
+    { path: "components/ui/accordion.tsx", content: "export const Accordion = () => null;\n" },
+  ],
+  dependencies: ["motion@^12.0.0", "clsx"],
+});
+assert.deepEqual(applyRelumeCompatibility([
+  'import { motion } from "motion/react";',
+  "const lineVariants = { open: { transition: { ease: \"easeInOut\" } } };",
+].join("\n")), {
+  content: [
+    'import { type Variants, motion } from "motion/react";',
+    "const lineVariants: Variants = { open: { transition: { ease: \"easeInOut\" } } };",
+  ].join("\n"),
+  edits: 1,
+});
+assert.equal(relumeComponentApi("components/relume/Header1.tsx", [
+  "type Props = { heading: string };",
+  "export type Header1Props = Partial<Props>;",
+  "export const Header1 = (props: Header1Props) => {",
+  "  return null;",
+  "};",
+].join("\n")), [
+  "## components/relume/Header1.tsx",
+  "",
+  "```tsx",
+  "type Props = { heading: string };",
+  "export type Header1Props = Partial<Props>;",
+  "export const Header1 = (props: Header1Props) => {",
+  "```",
+  "",
+].join("\n"));
 
 const parsed = parseArgs(["https://acme.test", "--slug", "Acme Plumbing"]);
 assert.deepEqual(parsed.positional, ["https://acme.test"]);

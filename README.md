@@ -40,15 +40,29 @@ After every OpenCode invocation, the runner replaces the run's cumulative model-
 
    Output: `proof.md`, freeform except for the three outreach lines consumed by deterministic storage
 
-3. **(GPT-5.6 Sol) Build the finished page**
+3. **(GPT-5.6 Sol) Choose the composition**
 
-   Input: `proof.md`, every captured image and its contact sheets, the original screenshot, the Relume MCP, and the starter project files
+   Input: `proof.md`, every captured image and its contact sheets, the original screenshot, and Relume search
 
-   Output: the finished page and its selected Relume components
+   Output: an ordered list of 5-7 Relume component slugs
 
-   Sol uses the Relume MCP normally to search, choose, retrieve, and install sections and primitives. It adapts the business's content to those layouts instead of inventing the composition.
+4. **(Code) Install the selected Relume components**
 
-4. **(Code) Verify and deploy**
+   Input: selected Relume slugs
+
+   Output: deterministically installed section, element, primitive, hook, and utility files plus their original sources and immutable hashes
+
+   Code may add only mechanical TypeScript compatibility annotations required by the pinned template dependencies. The original source and each exact compatibility difference remain committed for comparison.
+
+5. **(GPT-5.6 Sol, same session) Populate and theme the page**
+
+   Input: the installed components and all preceding context
+
+   Output: `app/page.tsx`, theme variables in `app/globals.css`, and metadata in `app/layout.tsx`
+
+   The installed Relume source is read-only. Sol supplies typed props, copy, original images, one primary color, and one neutral palette. It cannot add named CSS classes or edit component Tailwind classes.
+
+6. **(Code) Verify and deploy**
 
    Input: completed project
 
