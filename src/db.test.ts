@@ -29,6 +29,13 @@ if (!process.env.DATABASE_URL) {
     await updateBusinessDiscoveryContactInfo(discovered.id, {
       email: "hello@discovered.example.test",
       contactFormUrl: "https://discovered.example.test/contact",
+      phone: "+17755550100",
+      contactMethods: [
+        { type: "email", value: "hello@discovered.example.test" },
+        { type: "email", value: "owner@gmail.com" },
+        { type: "contact_form", value: "https://discovered.example.test/contact" },
+        { type: "phone", value: "+17755550100" },
+      ],
       emailVerificationStatus: "verified",
       emailCatchAll: true,
     });
@@ -46,6 +53,31 @@ if (!process.env.DATABASE_URL) {
       email_verification_status: "verified",
       email_catch_all: true,
     });
+    await updateBusinessContactInfo(discovered.id, {
+      email: "owner@gmail.com",
+      contactMethods: [{ type: "email", value: "owner@gmail.com" }],
+    });
+    const [selectedEmail] = await db`select email from businesses where id = ${discovered.id}`;
+    assert.equal(selectedEmail.email, "hello@discovered.example.test");
+    const methods = await db`
+      select id, type, value, verification_status, catch_all, created_at, updated_at
+      from contact_methods where business_id = ${discovered.id} order by type, value
+    `;
+    assert.deepEqual(methods.map(({ id, created_at, updated_at, ...method }) => method), [
+      { type: "contact_form", value: "https://discovered.example.test/contact", verification_status: null, catch_all: null },
+      { type: "email", value: "hello@discovered.example.test", verification_status: "verified", catch_all: true },
+      { type: "email", value: "owner@gmail.com", verification_status: null, catch_all: null },
+      { type: "phone", value: "+17755550100", verification_status: null, catch_all: null },
+    ]);
+    for (const method of methods) {
+      assert.match(String(method.id), /^cm_[0-9a-f-]{36}$/);
+      assert.ok(method.created_at);
+      assert.ok(method.updated_at);
+    }
+    const [discovery] = await db`select id, created_at, updated_at from business_discoveries where business_id = ${discovered.id} limit 1`;
+    assert.match(String(discovery.id), /^dis_[0-9a-f-]{36}$/);
+    assert.ok(discovery.created_at);
+    assert.ok(discovery.updated_at);
     const funnel = await listDiscoveryFunnel();
     assert.deepEqual(funnel.find((row) => row.category === testCategory && row.area === testArea), {
       category: testCategory,

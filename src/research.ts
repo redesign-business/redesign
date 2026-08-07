@@ -12,7 +12,26 @@ export type ResearchFile = {
 export type ContactInfo = {
   email?: string;
   contactFormUrl?: string;
+  phone?: string;
+  contactMethods: ContactMethod[];
 };
+
+export type ContactMethod = {
+  type: "email" | "contact_form" | "phone";
+  value: string;
+};
+
+export function extractOutreachProof(markdown: string) {
+  const section = markdown.match(/(?:^|\n)## Outreach\s*\n([\s\S]*?)(?=\n## |\s*$)/)?.[1] ?? "";
+  const proof = section.match(/^[-*]\s+(.+)$/gm)?.map((line) => {
+    const sentence = line.replace(/^[-*]\s+/, "").trim();
+    return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
+  }) ?? [];
+  if (proof.length !== 3) {
+    throw new Error("proof.md must begin with an Outreach section containing exactly three one-line sentences");
+  }
+  return proof;
+}
 
 type PageData = {
   url: string;
@@ -21,21 +40,24 @@ type PageData = {
 };
 
 type ImageData = {
+  id: string;
   pageUrl: string;
   pageTitle?: string;
   sourceUrl: string;
   localPath: string;
+  src: string;
   alt?: string;
   title?: string;
   nearestHeading?: string;
   context?: string;
   linkHref?: string;
   linkText?: string;
+  role?: "logo";
   contentType?: string;
   bytes: number;
 };
 
-type ImageCandidate = Omit<ImageData, "localPath" | "contentType" | "bytes">;
+type ImageCandidate = Omit<ImageData, "id" | "localPath" | "src" | "contentType" | "bytes">;
 
 const maxPages = Number(process.env.REDESIGN_RESEARCH_MAX_PAGES ?? 40);
 const maxImagesPerPage = Number(process.env.REDESIGN_RESEARCH_MAX_IMAGES_PER_PAGE ?? 40);
@@ -50,7 +72,13 @@ const turndown = new TurndownService({
 
 export async function collectResearch(site: string, workdir: string): Promise<{ files: ResearchFile[]; contactInfo: ContactInfo }> {
   const { pages, imageCandidates, contactInfo } = await crawlSite(site, maxPages, true);
-  const images = await downloadImages(dedupeImages(imageCandidates));
+  const images = (await downloadImages(dedupeImages(imageCandidates)))
+    .sort((left, right) => Number(right.role === "logo") - Number(left.role === "logo"))
+    .map((image, index) => ({
+      ...image,
+      id: `img_${String(index + 1).padStart(3, "0")}`,
+      src: `/${image.localPath.replace(/^public\//, "")}`,
+    }));
   return {
     contactInfo,
     files: [
@@ -81,8 +109,7 @@ async function crawlSite(site: string, pageLimit: number, collectAssets: boolean
   const queue = [site];
   const pages: PageData[] = [];
   const imageCandidates: ImageCandidate[] = [];
-  let email: string | undefined;
-  let contactFormUrl: string | undefined;
+  const contactMethods = new Map<string, ContactMethod>();
 
   while (queue.length && pages.length < pageLimit) {
     const url = queue.shift();
@@ -100,10 +127,7 @@ async function crawlSite(site: string, pageLimit: number, collectAssets: boolean
 
     const $ = cheerio.load(html);
     $("script, style, noscript").remove();
-    const contact = inspectContactInfo($, pageUrl);
-    email ??= contact.email;
-    contactFormUrl ??= contact.contactFormUrl;
-    if (!collectAssets && email && contactFormUrl) break;
+    for (const method of inspectContactMethods($, pageUrl)) contactMethods.set(`${method.type}\0${method.value}`, method);
     const links = sameDomainLinks($, pageUrl, origin)
       .sort((left, right) => Number(!hasContactIntent(left)) - Number(!hasContactIntent(right)));
     for (const href of links) {
@@ -114,40 +138,73 @@ async function crawlSite(site: string, pageLimit: number, collectAssets: boolean
     if (collectAssets) imageCandidates.push(...imageUrls($, pageUrl, page.title).slice(0, maxImagesPerPage));
   }
 
-  return { pages, imageCandidates, contactInfo: { email, contactFormUrl } };
+  return { pages, imageCandidates, contactInfo: summarizeContactMethods([...contactMethods.values()], origin) };
 }
 
 export function extractContactInfo(html: string, pageUrl: string): ContactInfo {
   const $ = cheerio.load(html);
   $("script, style, noscript").remove();
-  const contact = inspectContactInfo($, pageUrl);
-  return { email: contact.email, contactFormUrl: contact.contactFormUrl };
+  return summarizeContactMethods(inspectContactMethods($, pageUrl), new URL(pageUrl).origin);
 }
 
-function inspectContactInfo($: cheerio.CheerioAPI, pageUrl: string) {
-  const mailto = $("a[href^='mailto:' i]")
-    .map((_, element) => emailAddress(($(element).attr("href") ?? "").slice(7).split("?")[0] ?? ""))
-    .get()
-    .find(Boolean);
+function inspectContactMethods($: cheerio.CheerioAPI, pageUrl: string): ContactMethod[] {
+  const methods: ContactMethod[] = [];
+  $("a[href^='mailto:' i]").each((_, element) => {
+    for (const email of emailAddresses(($(element).attr("href") ?? "").slice(7).split("?")[0] ?? "")) {
+      methods.push({ type: "email", value: email });
+    }
+  });
+  $("a[href^='tel:' i]").each((_, element) => {
+    for (const phone of phoneNumbers(($(element).attr("href") ?? "").slice(4))) methods.push({ type: "phone", value: phone });
+  });
   const visible = $.root().find("*").contents()
     .filter((_, node) => node.type === "text")
     .map((_, node) => $(node).text())
     .get()
     .join(" ");
-  const contactFormUrl = $("form").toArray().some((form) => isContactForm($, form, pageUrl)) ? pageUrl : undefined;
-  return { email: mailto ?? emailAddress(visible), contactFormUrl };
+  for (const email of emailAddresses(visible)) methods.push({ type: "email", value: email });
+  for (const phone of phoneNumbers(visible)) methods.push({ type: "phone", value: phone });
+  if ($("form").toArray().some((form) => isContactForm($, form, pageUrl))) methods.push({ type: "contact_form", value: pageUrl });
+  return [...new Map(methods.map((method) => [`${method.type}\0${method.value}`, method])).values()];
 }
 
-function emailAddress(value: string) {
+function emailAddresses(value: string) {
   try {
-    const email = decodeURIComponent(value).match(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.[a-z]{2,24}(?=$|[^a-z])/i)?.[0];
-    if (!email) return undefined;
-    if (/@(?:example\.(?:com|org|net)|example\.test)$/i.test(email)) return undefined;
-    if (/^(?:example|your-?email|email)@/i.test(email)) return undefined;
-    return email;
+    return [...decodeURIComponent(value).matchAll(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.[a-z]{2,24}(?=$|[^a-z])/gi)]
+      .map(([email]) => email.toLowerCase())
+      .filter((email) => !/@(?:example\.(?:com|org|net)|example\.test)$/i.test(email))
+      .filter((email) => !/^(?:example|your-?email|email)@/i.test(email));
   } catch {
-    return undefined;
+    return [];
   }
+}
+
+function phoneNumbers(value: string) {
+  return [...value.matchAll(/(?:\+?1[\s.(\-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.\-]*\d{3}[\s.\-]*\d{4}(?:\s*(?:x|ext\.?|extension)\s*\d+)?/gi)]
+    .map(([phone]) => normalizePhone(phone))
+    .filter((phone): phone is string => Boolean(phone));
+}
+
+export function normalizePhone(value: string) {
+  const [number, extension] = value.toLowerCase().split(/\s*(?:x|ext\.?|extension)\s*/);
+  const digits = number.replace(/\D/g, "");
+  const normalized = digits.length === 10 ? `+1${digits}` : digits.length === 11 && digits.startsWith("1") ? `+${digits}` : undefined;
+  return normalized && extension ? `${normalized}x${extension.replace(/\D/g, "")}` : normalized;
+}
+
+function summarizeContactMethods(contactMethods: ContactMethod[], origin: string): ContactInfo {
+  const emails = contactMethods.filter((method) => method.type === "email").map((method) => method.value);
+  const host = new URL(origin).hostname.toLowerCase().replace(/^www\./, "");
+  const email = emails.find((value) => {
+    const domain = value.split("@")[1] ?? "";
+    return host === domain || host.endsWith(`.${domain}`) || domain.endsWith(`.${host}`);
+  }) ?? emails[0];
+  return {
+    email,
+    contactFormUrl: contactMethods.find((method) => method.type === "contact_form")?.value,
+    phone: contactMethods.find((method) => method.type === "phone")?.value,
+    contactMethods,
+  };
 }
 
 function isContactForm($: cheerio.CheerioAPI, form: Element, pageUrl: string) {
@@ -342,9 +399,9 @@ function imageKey(sourceUrl: string) {
 
 const imageContent = new Map<string, Buffer>();
 
-async function downloadImages(images: ImageCandidate[]): Promise<ImageData[]> {
+async function downloadImages(images: ImageCandidate[]): Promise<Array<Omit<ImageData, "id" | "src">>> {
   imageContent.clear();
-  const downloaded: ImageData[] = [];
+  const downloaded: Array<Omit<ImageData, "id" | "src">> = [];
 
   for (const image of images) {
     const response = await fetchWithTimeout(image.sourceUrl);
@@ -353,7 +410,8 @@ async function downloadImages(images: ImageCandidate[]): Promise<ImageData[]> {
     if (!contentType.toLowerCase().startsWith("image/")) continue;
 
     const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.byteLength < minImageBytes) continue;
+    const likelyLogo = isLikelyLogo(image);
+    if (buffer.byteLength < minImageBytes && !likelyLogo) continue;
     const localPath = `public/images/${imageFilename(image.sourceUrl, contentType, buffer)}`;
     if (imageContent.has(localPath)) continue;
 
@@ -361,12 +419,17 @@ async function downloadImages(images: ImageCandidate[]): Promise<ImageData[]> {
     downloaded.push({
       ...image,
       localPath,
+      role: likelyLogo ? "logo" : undefined,
       contentType,
       bytes: buffer.byteLength,
     });
   }
 
   return downloaded;
+}
+
+export function isLikelyLogo(image: { sourceUrl: string; alt?: string; title?: string }) {
+  return /(?:^|[^a-z])(logo|brandmark|wordmark)(?:[^a-z]|$)/i.test([image.sourceUrl, image.alt, image.title].filter(Boolean).join(" "));
 }
 
 function imageFilename(sourceUrl: string, contentType: string, buffer: Buffer) {

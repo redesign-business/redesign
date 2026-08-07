@@ -3,12 +3,13 @@ import {
   listBusinessesForDiscoveryQualification,
   listDiscoveryFunnel,
   recordBusinessDiscovery,
+  upsertContactMethods,
   upsertDiscoveredBusiness,
   updateBusinessDiscoveryContactInfo,
   type DiscoveredBusinessRecord,
   type DiscoveryFunnelRow,
 } from "./db.js";
-import { collectContactInfo } from "./research.js";
+import { collectContactInfo, normalizePhone } from "./research.js";
 
 export type Bounds = {
   low: { latitude: number; longitude: number };
@@ -21,6 +22,7 @@ export type Place = {
   formattedAddress?: string;
   businessStatus?: string;
   websiteUri?: string;
+  nationalPhoneNumber?: string;
 };
 
 type Verification = {
@@ -174,12 +176,14 @@ async function discoverQueries(queries: DiscoveryQuery[]): Promise<DiscoveryResu
         });
         candidates.set(place.id, business);
       }
+      const phone = place.nationalPhoneNumber ? normalizePhone(place.nationalPhoneNumber) : undefined;
+      if (phone) await upsertContactMethods(business.id, [{ type: "phone", value: phone }]);
       await recordBusinessDiscovery(business.id, query.category, query.area);
     }
     console.log(`[${index + 1}/${queries.length}] ${query.category} in ${query.area}: ${found.places.length}`);
   }
 
-  const failedBusinesses = await qualifyBusinesses([...candidates.values()], instantlyApiKey);
+  const failedBusinesses = await qualifyBusinesses([...candidates.values()], instantlyApiKey, true);
 
   const funnel = await listDiscoveryFunnel();
   return {
@@ -201,13 +205,13 @@ export async function qualifyDiscoveredBusinesses() {
   };
 }
 
-async function qualifyBusinesses(businesses: DiscoveredBusinessRecord[], instantlyApiKey: string) {
+async function qualifyBusinesses(businesses: DiscoveredBusinessRecord[], instantlyApiKey: string, refresh = false) {
   let failedBusinesses = 0;
   let completed = 0;
   // ponytail: one hundred independent domains keep this broad pilot practical; add adaptive throttling only if failures show it is needed.
   await runPool(businesses, 100, async (business) => {
       try {
-        await qualifyBusiness(business, instantlyApiKey);
+        await qualifyBusiness(business, instantlyApiKey, refresh);
       } catch (error) {
         failedBusinesses += 1;
         console.error(`${business.name}: ${error instanceof Error ? error.message : error}`);
@@ -229,9 +233,9 @@ export async function runPool<T>(items: T[], concurrency: number, task: (item: T
   }));
 }
 
-async function qualifyBusiness(business: DiscoveredBusinessRecord, instantlyApiKey: string) {
+async function qualifyBusiness(business: DiscoveredBusinessRecord, instantlyApiKey: string, refresh: boolean) {
   if (business.googleBusinessStatus === "CLOSED_PERMANENTLY" || !business.website) return;
-  if (business.contactCheckedAt) {
+  if (business.contactCheckedAt && !refresh) {
     if (!business.email || business.emailVerificationStatus === "verified" || business.emailVerificationStatus === "invalid") return;
     const verification = await existingOrPendingVerification(
       business.email,
@@ -248,10 +252,15 @@ async function qualifyBusiness(business: DiscoveredBusinessRecord, instantlyApiK
   }
 
   const contact = await collectContactInfo(business.website);
+  await upsertContactMethods(business.id, contact.contactMethods);
   const email = contact.email ?? business.email ?? undefined;
   const contactFormUrl = contact.contactFormUrl ?? business.contactFormUrl ?? undefined;
   if (!email) {
-    await updateBusinessDiscoveryContactInfo(business.id, { contactFormUrl });
+    await updateBusinessDiscoveryContactInfo(business.id, {
+      contactFormUrl,
+      phone: contact.phone,
+      contactMethods: contact.contactMethods,
+    });
     return;
   }
 
@@ -262,6 +271,8 @@ async function qualifyBusiness(business: DiscoveredBusinessRecord, instantlyApiK
   await updateBusinessDiscoveryContactInfo(business.id, {
     email,
     contactFormUrl,
+    phone: contact.phone,
+    contactMethods: contact.contactMethods,
     emailVerificationStatus: verification.verification_status,
     emailCatchAll,
   });
@@ -336,7 +347,7 @@ async function searchPlaces(category: string, bounds: Bounds, apiKey: string) {
       headers: {
         "content-type": "application/json",
         "X-Goog-Api-Key": apiKey,
-        "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.businessStatus,places.websiteUri,nextPageToken",
+        "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.businessStatus,places.websiteUri,places.nationalPhoneNumber,nextPageToken",
       },
       body: JSON.stringify({
         textQuery: category,

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { config as loadEnv } from "dotenv";
 import { Sandbox } from "@vercel/sandbox";
 import {
@@ -16,7 +16,6 @@ import {
   type ExistingRedesignRecord,
   type RedesignCandidateRecord,
 } from "./db.js";
-import { runPool } from "./discovery.js";
 import { collectContactInfo } from "./research.js";
 
 loadEnv({ path: ".env.local", quiet: true });
@@ -64,6 +63,13 @@ export type RedesignBatchOptions = {
   timeoutMinutes?: number;
 };
 
+type AiGatewayKey = {
+  id: string;
+  key: string;
+  name: string;
+  budget: number;
+};
+
 const WORKDIR = "/vercel/sandbox";
 const TMUX_SESSION = "redesign";
 const DEFAULT_RESEARCH_MODEL = "deepseek/deepseek-v4-flash-0731";
@@ -73,6 +79,9 @@ const DEFAULT_GITHUB_OWNER = "redesign-business";
 const DEFAULT_BASE_DOMAIN = "redesign.business";
 const DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com";
 const DEFAULT_AI_GATEWAY_BUDGET = 1;
+const DEFAULT_BATCH_CONCURRENCY = 30;
+const DEFAULT_BATCH_LAUNCH_INTERVAL_MS = 1_000;
+const AI_GATEWAY_KEY_POOL_FILE = process.env.AI_GATEWAY_KEY_POOL_FILE ?? join(process.cwd(), ".data", "ai-gateway-key-pool.json");
 const SANDBOX_CLI_VERSION = "3.5.5";
 const BLOCKED_MAILBOX = /^(?:privacy|legal|abuse|careers?|jobs?|employment|hr|billing|accounts?|accessibility|webmaster|no-?reply|do-?not-?reply|support|customer-?service|communications?|media|press|marketing|reservations?)$/i;
 
@@ -300,6 +309,110 @@ async function createAiGatewayKey(slug: string) {
   return { id, key: json.apiKeyString, name, budget };
 }
 
+function aiGatewayQuotaUrl(id: string) {
+  const params = new URLSearchParams({ quotaEntityId: `api_key_id_${id}` });
+  return `https://ai-gateway.vercel.sh/v1/quotas?${params}`;
+}
+
+type AiGatewayQuota = { active?: boolean; currentSpend?: number; limitAmount?: number };
+
+async function getAiGatewayQuota(aiGatewayKey: AiGatewayKey) {
+  const response = await fetch(aiGatewayQuotaUrl(aiGatewayKey.id), {
+    headers: { Authorization: `Bearer ${aiGatewayKey.key}` },
+  });
+  if (response.ok) return response.json() as Promise<AiGatewayQuota>;
+  const json = await response.json().catch(() => ({})) as { error?: string | { message?: string }; message?: string };
+  const message = typeof json.error === "string" ? json.error : json.error?.message;
+  throw new Error(`AI Gateway quota check failed: ${message ?? json.message ?? response.statusText}`);
+}
+
+async function waitForAiGatewayKey(aiGatewayKey: AiGatewayKey, limitAmount = aiGatewayKey.budget, currentSpend?: number) {
+  const deadline = Date.now() + 5 * 60_000;
+  while (Date.now() < deadline) {
+    const quota = await getAiGatewayQuota(aiGatewayKey).catch((error) => {
+      if (error instanceof Error && /not found/i.test(error.message)) return undefined;
+      throw error;
+    });
+    if (quota?.active && quota.limitAmount === limitAmount && (currentSpend === undefined || quota.currentSpend === currentSpend)) return;
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+  }
+  throw new Error(`AI Gateway quota did not become active for ${aiGatewayKey.name}`);
+}
+
+async function aiGatewayKeyIsAvailable(aiGatewayKey: AiGatewayKey) {
+  const quota = await getAiGatewayQuota(aiGatewayKey);
+  return quota.active === true
+    && typeof quota.currentSpend === "number"
+    && typeof quota.limitAmount === "number"
+    && quota.limitAmount > quota.currentSpend;
+}
+
+export async function refillAiGatewayKey(aiGatewayKey: AiGatewayKey) {
+  const url = aiGatewayQuotaUrl(aiGatewayKey.id);
+  const headers = {
+    Authorization: `Bearer ${aiGatewayKey.key}`,
+    "Content-Type": "application/json",
+  };
+  const quota = await getAiGatewayQuota(aiGatewayKey);
+  if (typeof quota.currentSpend !== "number") throw new Error(`AI Gateway did not report spend for ${aiGatewayKey.name}`);
+  const limitAmount = quota.currentSpend + aiGatewayKey.budget;
+  const updated = await fetch(url, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({
+      active: true,
+      limitAmount,
+      refreshPeriod: "none",
+    }),
+  });
+  if (!updated.ok) {
+    const json = await updated.json().catch(() => ({})) as { error?: string | { message?: string }; message?: string };
+    const message = typeof json.error === "string" ? json.error : json.error?.message;
+    throw new Error(`AI Gateway quota refill failed: ${message ?? json.message ?? updated.statusText}`);
+  }
+  await waitForAiGatewayKey(aiGatewayKey, limitAmount);
+}
+
+async function createAiGatewayKeyPool(size: number) {
+  const keys = await readAiGatewayKeyPool();
+  for (let index = keys.length; index < size; index += 1) {
+    try {
+      keys.push(await createAiGatewayKey(`pool-${index + 1}`));
+      await writeAiGatewayKeyPool(keys);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (keys.length && /rate limit|too many requests/i.test(message)) {
+        console.warn(`AI Gateway pool has ${keys.length}/${size} keys; key creation is currently rate-limited`);
+        break;
+      }
+      throw error;
+    }
+  }
+  const selected = keys.slice(0, size);
+  await Promise.all(selected.map(async (key) => {
+    if (!await aiGatewayKeyIsAvailable(key)) await refillAiGatewayKey(key);
+  }));
+  return selected;
+}
+
+async function readAiGatewayKeyPool(): Promise<AiGatewayKey[]> {
+  try {
+    const value = JSON.parse(await readFile(AI_GATEWAY_KEY_POOL_FILE, "utf8"));
+    if (!Array.isArray(value)) throw new Error("expected an array");
+    return value as AiGatewayKey[];
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
+    throw new Error(`Invalid AI Gateway key pool: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+export async function writeAiGatewayKeyPool(keys: AiGatewayKey[]) {
+  await mkdir(dirname(AI_GATEWAY_KEY_POOL_FILE), { recursive: true });
+  const temporaryFile = `${AI_GATEWAY_KEY_POOL_FILE}.tmp`;
+  await writeFile(temporaryFile, `${JSON.stringify(keys, null, 2)}\n`, { mode: 0o600 });
+  await rename(temporaryFile, AI_GATEWAY_KEY_POOL_FILE);
+}
+
 async function deleteAiGatewayKey(id: string) {
   const token = process.env.VERCEL_TOKEN;
   if (!token) return;
@@ -313,7 +426,8 @@ async function deleteAiGatewayKey(id: string) {
 }
 
 function runnerEnv(options: {
-  aiGatewayKey: Awaited<ReturnType<typeof createAiGatewayKey>>;
+  aiGatewayKey: AiGatewayKey;
+  pooledAiGatewayKey?: boolean;
   githubToken: string;
   originalUrl: string;
   slug: string;
@@ -346,6 +460,7 @@ function runnerEnv(options: {
     AI_GATEWAY_KEY_ID: options.aiGatewayKey.id,
     AI_GATEWAY_KEY_NAME: options.aiGatewayKey.name,
     AI_GATEWAY_BUDGET: String(options.aiGatewayKey.budget),
+    AI_GATEWAY_KEY_POOLED: String(options.pooledAiGatewayKey === true),
     ...postHogPublicEnv(options.slug),
   };
 }
@@ -360,6 +475,7 @@ async function uploadRunner(sandbox: Sandbox) {
         dependencies: {
           "@neondatabase/serverless": "^1.1.0",
           cheerio: "^1.2.0",
+          playwright: "1.62.1",
           turndown: "^7.2.4",
           tsx: "^4.20.6",
         },
@@ -398,14 +514,16 @@ async function startTmuxRunner(sandbox: Sandbox, env: Record<string, string>) {
   }), "tmux start");
 }
 
-async function cloneJobRepo(sandbox: Sandbox, repoUrl: string) {
+async function cloneJobRepo(sandbox: Sandbox, repoUrl: string, githubToken: string) {
   await must(await sandbox.runCommand({
     cmd: "bash",
     args: ["-lc", [
       "set -euo pipefail",
       `find ${WORKDIR} -mindepth 1 -maxdepth 1 -exec rm -rf {} +`,
-      `git clone --depth 1 ${JSON.stringify(repoUrl)} ${WORKDIR}`,
+      "auth=$(printf 'x-access-token:%s' \"$GITHUB_TOKEN\" | base64 | tr -d '\\n')",
+      `git -c "http.extraHeader=Authorization: Basic $auth" clone --depth 1 ${JSON.stringify(repoUrl)} ${WORKDIR}`,
     ].join("\n")],
+    env: { GITHUB_TOKEN: githubToken },
   }), "job repo clone");
 }
 
@@ -422,7 +540,7 @@ async function createJobSandbox(params: { name: string; repoUrl: string; githubT
       ...common,
       source: { type: "snapshot", snapshotId: process.env.REDESIGN_TEMPLATE_SNAPSHOT_ID },
     });
-    await cloneJobRepo(sandbox, params.repoUrl);
+    await cloneJobRepo(sandbox, params.repoUrl, params.githubToken);
     return sandbox;
   }
   if (process.env.REDESIGN_TEMPLATE_SANDBOX) {
@@ -430,7 +548,7 @@ async function createJobSandbox(params: { name: string; repoUrl: string; githubT
       ...common,
       sourceSandbox: process.env.REDESIGN_TEMPLATE_SANDBOX,
     });
-    await cloneJobRepo(sandbox, params.repoUrl);
+    await cloneJobRepo(sandbox, params.repoUrl, params.githubToken);
     return sandbox;
   }
   return Sandbox.create({
@@ -474,7 +592,7 @@ export async function attachToSandbox(sandboxName: string) {
   });
 }
 
-export async function runRedesign(options: RedesignOptions): Promise<RedesignResult> {
+async function runRedesignWithKey(options: RedesignOptions, pooledAiGatewayKey?: AiGatewayKey): Promise<RedesignResult> {
   const originalUrl = normalizeHttpUrl(options.site);
   const slug = normalizeSlug(options.slug ?? slugFromUrl(originalUrl));
   const businessSlug = normalizeSlug(options.businessSlug ?? slug);
@@ -490,7 +608,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
   if (!process.env.DATABASE_URL) throw new Error("Missing DATABASE_URL");
 
   const repo = await createGithubRepo(slug);
-  const aiGatewayKey = await createAiGatewayKey(slug);
+  const aiGatewayKey = pooledAiGatewayKey ?? await createAiGatewayKey(slug);
   let sandbox: Sandbox | undefined;
   let runnerStarted = false;
 
@@ -519,6 +637,7 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
 
     const env = runnerEnv({
       aiGatewayKey,
+      pooledAiGatewayKey: Boolean(pooledAiGatewayKey),
       githubToken,
       originalUrl,
       slug,
@@ -554,10 +673,14 @@ export async function runRedesign(options: RedesignOptions): Promise<RedesignRes
     }
     return result;
   } catch (error) {
-    if (!runnerStarted) await deleteAiGatewayKey(aiGatewayKey.id);
+    if (!runnerStarted && !pooledAiGatewayKey) await deleteAiGatewayKey(aiGatewayKey.id);
     if (sandbox) console.error(`Sandbox left running for inspection: ${sandbox.name}`);
     throw error;
   }
+}
+
+export async function runRedesign(options: RedesignOptions): Promise<RedesignResult> {
+  return runRedesignWithKey(options);
 }
 
 async function waitForRunCompletion(runId: string, timeoutMinutes: number) {
@@ -572,11 +695,12 @@ async function waitForRunCompletion(runId: string, timeoutMinutes: number) {
 
 export async function runRedesignBatch(options: RedesignBatchOptions = {}) {
   const limit = options.limit ?? 100;
-  const concurrency = options.concurrency ?? 100;
-  const launchIntervalMs = options.launchIntervalMs ?? 1_000;
+  const concurrency = options.concurrency ?? DEFAULT_BATCH_CONCURRENCY;
+  const launchIntervalMs = options.launchIntervalMs ?? DEFAULT_BATCH_LAUNCH_INTERVAL_MS;
   const timeoutMinutes = options.timeoutMinutes ?? 90;
   if (!Number.isInteger(limit) || limit < 1) throw new Error("Batch limit must be a positive integer");
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error("Batch concurrency must be a positive integer");
+  if (concurrency > DEFAULT_BATCH_CONCURRENCY) throw new Error(`Batch concurrency cannot exceed ${DEFAULT_BATCH_CONCURRENCY}`);
   if (!Number.isFinite(launchIntervalMs) || launchIntervalMs < 0) throw new Error("Launch interval must be zero or greater");
 
   const selected = selectRedesignCandidates(
@@ -586,61 +710,76 @@ export async function runRedesignBatch(options: RedesignBatchOptions = {}) {
   );
   if (selected.length < limit) console.warn(`Selected ${selected.length}/${limit} eligible businesses`);
 
-  const startedAt = Date.now();
+  const aiGatewayKeys = await createAiGatewayKeyPool(Math.min(concurrency, selected.length));
+
+  let nextLaunchAt = Date.now();
+  let nextCandidate = 0;
   const results: Array<{
     business: string;
     email: string;
     sourceUrl: string;
     redesignUrl?: string;
+    proofSentences?: string[];
     status: string;
     totalCost?: number;
     error?: string;
   }> = [];
   let completed = 0;
 
-  await runPool(selected.map((candidate, index) => ({ candidate, index })), concurrency, async ({ candidate, index }) => {
-    const launchAt = startedAt + index * launchIntervalMs;
-    if (launchAt > Date.now()) await new Promise((resolve) => setTimeout(resolve, launchAt - Date.now()));
-    let sandbox: string | undefined;
-    try {
-      const job = await runRedesign({
-        site: candidate.website,
-        business: candidate.name,
-        businessSlug: candidate.slug,
-        slug: candidate.redesignSlug,
-        timeoutMinutes,
-        attach: false,
-      });
-      sandbox = job.sandbox;
-      const run = await waitForRunCompletion(job.runId, timeoutMinutes + 5);
-      results.push({
-        business: candidate.name,
-        email: candidate.email,
-        sourceUrl: candidate.website,
-        redesignUrl: run.redesignUrl ?? job.expectedRedesignUrl,
-        status: run.status,
-        totalCost: run.totalCost ?? undefined,
-        error: run.error ?? undefined,
-      });
-    } catch (error) {
-      results.push({
-        business: candidate.name,
-        email: candidate.email,
-        sourceUrl: candidate.website,
-        status: "failed",
-        error: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      if (sandbox) await cleanupSandbox(sandbox).catch(() => {});
-      completed += 1;
-      console.log(`Batch completed ${completed}/${selected.length}`);
-    }
-  });
+  const workers = await Promise.allSettled(aiGatewayKeys.map(async (aiGatewayKey) => {
+      while (true) {
+        const candidate = selected[nextCandidate];
+        nextCandidate += 1;
+        if (!candidate) return;
+
+        const launchAt = Math.max(nextLaunchAt, Date.now());
+        nextLaunchAt = launchAt + launchIntervalMs;
+        if (launchAt > Date.now()) await new Promise((resolve) => setTimeout(resolve, launchAt - Date.now()));
+        let sandbox: string | undefined;
+        try {
+          const job = await runRedesignWithKey({
+            site: candidate.website,
+            business: candidate.name,
+            businessSlug: candidate.slug,
+            slug: candidate.redesignSlug,
+            timeoutMinutes,
+            attach: false,
+          }, aiGatewayKey);
+          sandbox = job.sandbox;
+          const run = await waitForRunCompletion(job.runId, timeoutMinutes + 5);
+          results.push({
+            business: candidate.name,
+            email: candidate.email,
+            sourceUrl: candidate.website,
+            redesignUrl: run.redesignUrl ?? job.expectedRedesignUrl,
+            proofSentences: run.proofSentences,
+            status: run.status,
+            totalCost: run.totalCost ?? undefined,
+            error: run.error ?? undefined,
+          });
+        } catch (error) {
+          results.push({
+            business: candidate.name,
+            email: candidate.email,
+            sourceUrl: candidate.website,
+            status: "failed",
+            error: error instanceof Error ? error.message : String(error),
+          });
+        } finally {
+          if (sandbox) await cleanupSandbox(sandbox).catch(() => {});
+          completed += 1;
+          console.log(`Batch completed ${completed}/${selected.length}`);
+        }
+        await refillAiGatewayKey(aiGatewayKey);
+      }
+  }));
+  const failedWorker = workers.find((worker) => worker.status === "rejected");
+  if (failedWorker?.status === "rejected") throw failedWorker.reason;
 
   return {
     requested: limit,
     selected: selected.length,
-    concurrency,
+    concurrency: aiGatewayKeys.length,
     succeeded: results.filter(({ status }) => status === "succeeded").length,
     failed: results.filter(({ status }) => status !== "succeeded").length,
     totalCost: results.reduce((sum, result) => sum + (result.totalCost ?? 0), 0),
@@ -671,6 +810,8 @@ export async function backfillBusinessContacts() {
         const contactInfo = {
           email: business.email ? undefined : found.email,
           contactFormUrl: business.contactFormUrl ? undefined : found.contactFormUrl,
+          phone: found.phone,
+          contactMethods: found.contactMethods,
         };
         await updateBusinessContactInfo(business.id, contactInfo);
         console.log(`${business.slug}: ${contactInfo.email ?? "no email"}; ${contactInfo.contactFormUrl ?? "no contact form"}`);

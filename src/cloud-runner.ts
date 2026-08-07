@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { replaceRunSessions, updateBusinessContactInfo, updateRunData } from "./db.js";
-import { phaseComplete } from "./phase.js";
-import { collectResearch as collectResearchData } from "./research.js";
+import { phaseComplete, redactSessionOutput } from "./phase.js";
+import { collectResearch as collectResearchData, extractOutreachProof } from "./research.js";
 
 type Usage = {
   model?: string;
@@ -29,16 +29,16 @@ type Pricing = {
   cacheWrite: number;
 };
 
-type PermissionConfig = "allow" | Record<string, unknown>;
-
 const WORKDIR = "/vercel/sandbox";
 const OPENCODE_BIN = "/home/vercel-sandbox/.opencode/node_modules/.bin/opencode";
 const TEMPLATE_REPO = "https://github.com/redesign-business/template.git";
 const RESEARCH_MODEL = "deepseek/deepseek-v4-flash-0731";
-const DRAFT_MODEL = "openai/gpt-5.6-sol";
+const BUILD_MODEL = "openai/gpt-5.6-sol";
 const REPAIR_MODEL = "deepseek/deepseek-v4-flash-0731";
 const RESEARCH_AGENT = "research";
-const DRAFT_AGENT = "draft";
+const BUILD_AGENT = "build";
+const REPAIR_AGENT = "repair";
+const HOMEPAGE_SCREENSHOT = "/tmp/original-homepage.png";
 const MAX_PHASE_CONTINUES = Number(process.env.REDESIGN_MAX_PHASE_CONTINUES ?? 5);
 const MAX_BUILD_REPAIRS = Number(process.env.REDESIGN_MAX_BUILD_REPAIRS ?? 5);
 
@@ -57,6 +57,7 @@ const businessId = required("REDESIGN_BUSINESS_ID");
 const runId = required("REDESIGN_RUN_ID");
 const aiGatewayKeyId = required("AI_GATEWAY_KEY_ID");
 const aiGatewayKeyName = required("AI_GATEWAY_KEY_NAME");
+const aiGatewayKeyPooled = process.env.AI_GATEWAY_KEY_POOLED === "true";
 const aiGatewayBudget = Number(required("AI_GATEWAY_BUDGET"));
 
 function opencodeModel(model: string) {
@@ -80,30 +81,47 @@ function buildResearchPrompt() {
     `Original URL: ${originalUrl}`,
     "",
     "raw.md already contains crawled same-domain pages from the original website converted from HTML to Markdown.",
-    "public/images/manifest.json lists downloaded images with source URL, page, and context.",
+    "public/images/manifest.json lists downloaded images with stable IDs, browser src values, source URL, page, and context.",
     "",
-    "Make proof.md directly copy and organize all the business's demonstrated proof from raw.md. Examples of demonstrated proof are completed work, testimonials, awards, statistics, guarantees, credentials, press, partnerships, and anything the business has or has done that makes a potential customer trust them. Do not invent proof.",
+    "Begin proof.md with a section named `## Outreach` containing exactly three bullet points because deterministic outreach code stores those three lines. Each bullet must be one grounded, customer-facing sentence describing a distinct piece of proof worth showing in the redesign. State the proof directly; do not write instructions such as `feature`, `highlight`, `show`, or `emphasize`. End each sentence with a period.",
+    "After that small contract, compactly preserve the strongest distinct proof from raw.md: completed work, testimonials, awards, statistics, guarantees, credentials, press, partnerships, and anything the business has or has done that makes a potential customer trust them. Remove repetition and do not invent proof.",
     "",
     "You are done when proof.md is created. Don't run commands, clone, commit, push, search, or read other files.",
   ].join("\n");
 }
 
-function buildDraftPrompt() {
+function buildImplementationPrompt(hasImageContactSheets: boolean, hasHomepageScreenshot: boolean) {
   return [
-    "Read proof.md and public/images/manifest.json. Then create app/page.tsx.",
+    "Build one finished homepage from the supplied evidence.",
     "",
-    `Project slug: ${slug}`,
-    `GitHub repo: ${repoUrl}`,
     `Original URL: ${originalUrl}`,
     "",
-    "Task:",
-    "Build the site in app/page.tsx. Use the business's unique proof to inspire the design.",
-    "Use image localPath values from public/images/manifest.json. Use page title, nearest heading, surrounding context, filename, and source page to infer what each image was doing on the original site.",
-    "Typical structure: nav, hero, several proof sections, FAQ, final CTA, footer.",
-    "No text-only sections except nav, banners, the bar below hero, and footer. Do not repeat images or other media.",
-    "There is one CTA; use it everywhere.",
+    "Inputs:",
+    "- proof.md is the complete factual and copy source.",
+    "- .redesign/build-images.json is the complete allowed image set. Use its local `src` values.",
+    hasImageContactSheets
+      ? "- The attached contact sheets show those allowed images and their IDs."
+      : "- No usable original images were available.",
+    "- The authenticated Relume MCP provides the section library and its exact React source.",
+    hasHomepageScreenshot
+      ? "- The attached original screenshot is a brand reference, not a layout to copy."
+      : "- The original screenshot was unavailable.",
     "",
-    "You are done when app/page.tsx is created. Don't run commands, build, commit, push, search, or read other files.",
+    "Output contract:",
+    "- Use the Relume MCP normally to search for, choose, retrieve, and install the best-fitting sections and their required primitives.",
+    "- Use Relume components for the page's composition. Do not invent or restructure section layouts; adapt the content to their typed props.",
+    "- You may edit app/page.tsx, app/globals.css, app/layout.tsx, files returned by Relume, package.json, and pnpm-lock.yaml.",
+    "- Build 5-7 purposeful sections including navigation and footer. Use one CTA consistently.",
+    "- Use the strongest proof. Write concise copy that fits the composition. Do not invent claims.",
+    "- Preserve a strong original color or font when present and always use the original logo.",
+    "- Inspect every original-image contact sheet before choosing. Later sheets are equally important; never default to the earliest IDs.",
+    "- Choose images for visual fit with each selected layout. For work or portfolio sections, use the strongest distinct examples of the business's work, not logos, headshots, or decorative images.",
+    "- Use each selected image once and avoid near-duplicate crops of the same scene. Do not use remote placeholders, stock, generated, repeated, or upscaled media.",
+    "- Do not add carousels, video players, sticky scroll scenes, scroll-driven layouts, or large empty regions.",
+    "- Make the result responsive and polished at 1440px and mobile widths.",
+    "",
+    "Do not create plans or notes, browse the web, build, commit, push, or deploy. Only run pnpm add when Relume requires a dependency.",
+    "You are done after the finished site, selected Relume components, and business metadata are in the project.",
   ].join("\n");
 }
 
@@ -122,50 +140,8 @@ function buildRepairPrompt(buildOutput: string) {
 }
 
 function isBudgetFailure(output: string) {
-  return /budget|quota|limit|insufficient funds|payment required/i.test(output);
+  return /budget|quota|insufficient funds|payment required/i.test(output);
 }
-
-const researchPermission = {
-  read: {
-    "*": "deny",
-    "raw.md": "allow",
-    "public/images/manifest.json": "allow",
-  },
-  edit: {
-    "*": "deny",
-    "proof.md": "allow",
-  },
-  glob: "deny",
-  grep: "deny",
-  list: "deny",
-  bash: "deny",
-  task: "deny",
-  skill: "deny",
-  webfetch: "deny",
-  websearch: "deny",
-  external_directory: "deny",
-} satisfies PermissionConfig;
-
-const draftPermission = {
-  read: {
-    "*": "deny",
-    "proof.md": "allow",
-    "public/images/manifest.json": "allow",
-  },
-  edit: {
-    "*": "deny",
-    "app/page.tsx": "allow",
-  },
-  glob: "deny",
-  grep: "deny",
-  list: "deny",
-  bash: "deny",
-  task: "deny",
-  skill: "deny",
-  webfetch: "deny",
-  websearch: "deny",
-  external_directory: "deny",
-} satisfies PermissionConfig;
 
 async function run(command: string, args: string[], options: { cwd?: string; env?: Record<string, string>; allowFailure?: boolean; interactive?: boolean } = {}) {
   return new Promise<{ output: string; exitCode: number | null }>((resolve, reject) => {
@@ -216,14 +192,18 @@ async function commitAll(message: string) {
   ].join("\n"));
 }
 
-async function installOpenCode() {
-  await run("npm", ["install", "--prefix", "/home/vercel-sandbox/.opencode", "opencode-ai@1.18.9"], { cwd: WORKDIR });
+async function commitSessionLogs() {
+  await sh([
+    "git add .redesign/sessions",
+    "git commit -m 'chore: save agent sessions' || true",
+    "git push",
+  ].join("\n"));
 }
 
 async function setupGit() {
   await sh([
-    "git config user.name redesign-hosted-2",
-    "git config user.email redesign-hosted-2@users.noreply.github.com",
+    "git config user.name 'Xander Beaulac'",
+    "git config user.email xbeaulac@gmail.com",
     "git config credential.helper '!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f'",
     "git ls-remote origin HEAD >/dev/null",
   ].join(" && "));
@@ -243,34 +223,21 @@ async function seedTemplate() {
   await commitAll("chore: seed nextjs template");
 }
 
-async function setupOpenCode() {
-  await write("/home/vercel-sandbox/.config/opencode/opencode.json", JSON.stringify({
-    $schema: "https://opencode.ai/config.json",
-    enabled_providers: ["vercel"],
-    model: opencodeModel(RESEARCH_MODEL),
-    agent: {
-      [RESEARCH_AGENT]: {
-        model: opencodeModel(RESEARCH_MODEL),
-        mode: "primary",
-        maxSteps: 8,
-        permission: researchPermission,
-      },
-      [DRAFT_AGENT]: {
-        model: opencodeModel(DRAFT_MODEL),
-        mode: "primary",
-        maxSteps: 4,
-        permission: draftPermission,
-      },
-    },
-    provider: {
-      vercel: {
-        npm: "@ai-sdk/gateway",
-        env: ["AI_GATEWAY_API_KEY"],
-        options: { apiKey: "{env:AI_GATEWAY_API_KEY}" },
-        models: Object.fromEntries([...new Set([RESEARCH_MODEL, DRAFT_MODEL, REPAIR_MODEL])].map((model) => [model, {}])),
-      },
-    },
-  }, null, 2));
+async function captureHomepageScreenshot() {
+  const result = await sh([
+    "npx playwright screenshot",
+    "--browser chromium",
+    "--viewport-size '1440,1000'",
+    "--color-scheme light",
+    "--block-service-workers",
+    "--ignore-https-errors",
+    "--wait-for-timeout 3000",
+    "--timeout 20000",
+    JSON.stringify(originalUrl),
+    HOMEPAGE_SCREENSHOT,
+  ].join(" "), { allowFailure: true });
+  if (result.exitCode !== 0) console.warn("Original homepage screenshot unavailable; styling will continue without it.");
+  return result.exitCode === 0 && (await sh(`test -s ${HOMEPAGE_SCREENSHOT}`, { allowFailure: true })).exitCode === 0;
 }
 
 async function collectResearch() {
@@ -279,36 +246,87 @@ async function collectResearch() {
     await write(file.path, file.content);
   }
   await updateBusinessContactInfo(businessId, contactInfo);
-  await commitAll("chore: add scraped research inputs");
+}
+
+async function createBuildAssetPack() {
+  await mkdir(`${WORKDIR}/.redesign`, { recursive: true });
+  const manifest = JSON.parse(await readFile(`${WORKDIR}/public/images/manifest.json`, "utf8")) as {
+    images?: Array<Record<string, unknown>>;
+  };
+  const images = (manifest.images ?? []).map((image) => ({
+    id: image.id,
+    src: image.src,
+    localPath: image.localPath,
+    contentType: image.contentType,
+    role: image.role,
+    alt: image.alt,
+    pageTitle: image.pageTitle,
+    nearestHeading: image.nearestHeading,
+  }));
+  await write(`${WORKDIR}/.redesign/build-images.json`, `${JSON.stringify({ images }, null, 2)}\n`);
+  if (!images.length) return [];
+  await run("node", ["scripts/make-contact-sheet.mjs", ".redesign/build-images.json", ".redesign/build-contact-sheet"], { cwd: WORKDIR });
+  return (await readdir(`${WORKDIR}/.redesign`))
+    .filter((name) => /^build-contact-sheet-\d+\.png$/.test(name))
+    .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
+    .map((name) => `${WORKDIR}/.redesign/${name}`);
 }
 
 async function runOpenCodePhase(
   phase: string,
   model: string,
   args: string[],
-  options: { agent?: string; deliverableDelivered?: () => Promise<boolean> } = {},
+  options: { agent?: string; deliverableDelivered?: () => Promise<boolean>; retryMessage?: string; maxContinues?: number } = {},
 ) {
   const attempts: string[] = [];
   let output = "";
   let currentArgs = args;
 
-  for (let retry = 0; retry <= MAX_PHASE_CONTINUES; retry += 1) {
+  const maxContinues = options.maxContinues ?? MAX_PHASE_CONTINUES;
+  for (let retry = 0; retry <= maxContinues; retry += 1) {
     if (retry > 0) {
-      console.error(`\n${phase} did not deliver; retrying with OpenCode continue (${retry}/${MAX_PHASE_CONTINUES}).`);
-      currentArgs = ["run", "continue", "--continue", "--auto", "--dir", WORKDIR, options.agent ? "--agent" : "--model", options.agent ?? opencodeModel(model)];
+      console.error(`\n${phase} did not deliver; retrying with OpenCode continue (${retry}/${maxContinues}).`);
+      currentArgs = ["run", options.retryMessage ?? "Finish the requested deliverable.", "--continue", "--auto", "--dir", WORKDIR, options.agent ? "--agent" : "--model", options.agent ?? opencodeModel(model)];
     }
     const id = `${phase}-${randomUUID().slice(0, 8)}`;
     attempts.push(id);
     await updateRun({ status: phase, [`${phase}Attempts`]: attempts });
 
     const result = await run(OPENCODE_BIN, currentArgs, { cwd: WORKDIR, allowFailure: true, interactive: true });
+    const safeOutput = redactSessionOutput(result.output, [
+      process.env.AI_GATEWAY_API_KEY,
+      process.env.GITHUB_TOKEN,
+      process.env.VERCEL_TOKEN,
+      process.env.DATABASE_URL,
+    ]);
+    await write(`${WORKDIR}/.redesign/sessions/${id}.log`, [
+      `Phase: ${phase}`,
+      `Model: ${model}`,
+      `Exit code: ${result.exitCode ?? "unknown"}`,
+      "",
+      safeOutput,
+    ].join("\n"));
     output += result.output;
+    await recordUsage();
     const delivered = options.deliverableDelivered ? await options.deliverableDelivered() : undefined;
     if (phaseComplete(result.exitCode, delivered)) return { output, attempts };
     if (isBudgetFailure(result.output)) throw new Error(`${phase} failed with budget/quota error\n${outputTail(result.output)}`);
   }
 
-  throw new Error(`${phase} did not deliver after ${MAX_PHASE_CONTINUES} continue attempts\n${outputTail(output)}`);
+  throw new Error(`${phase} did not deliver after ${maxContinues} continue attempts\n${outputTail(output)}`);
+}
+
+async function implementationDelivered(globalsBefore: string) {
+  try {
+    const page = await readFile(`${WORKDIR}/app/page.tsx`, "utf8");
+    const globals = await readFile(`${WORKDIR}/app/globals.css`, "utf8");
+    const layout = await readFile(`${WORKDIR}/app/layout.tsx`, "utf8");
+    return page.length > 1_000
+      && globals !== globalsBefore
+      && !/Create Next App|Generated by create next app/.test(layout);
+  } catch {
+    return false;
+  }
 }
 
 async function buildWithRepairs() {
@@ -323,7 +341,10 @@ async function buildWithRepairs() {
     if (attempt === MAX_BUILD_REPAIRS) throw new Error(`build failed after ${MAX_BUILD_REPAIRS} repairs\n${outputTail(build.output)}`);
 
     await write("/tmp/build-repair-prompt.md", buildRepairPrompt(outputTail(build.output, 12_000)));
-    const repair = await runOpenCodePhase("build-repair", REPAIR_MODEL, ["run", "Follow the attached build repair prompt.", "--auto", "--dir", WORKDIR, "--title", "Build repair", "--model", opencodeModel(REPAIR_MODEL), "--file", "/tmp/build-repair-prompt.md"]);
+    const repair = await runOpenCodePhase("build-repair", REPAIR_MODEL, ["run", "Follow the attached build repair prompt.", "--auto", "--dir", WORKDIR, "--title", `Repair ${slug}`, "--agent", REPAIR_AGENT, "--file", "/tmp/build-repair-prompt.md"], {
+      agent: REPAIR_AGENT,
+      maxContinues: 0,
+    });
     repairs.push(...repair.attempts);
   }
   return { builds, repairs };
@@ -347,13 +368,13 @@ async function deploy() {
     "  if [ -n \"${!name:-}\" ]; then build_env+=(--build-env \"$name=${!name}\"); fi",
     "done",
     "npx --yes vercel link --yes --project \"$REDESIGN_SLUG\" \"${team[@]}\"",
-    "npx --yes vercel deploy --yes --no-wait \"${scope[@]}\" \"${build_env[@]}\" | tee /tmp/vercel-deploy.out",
+    "npx --yes vercel domains add \"$REDESIGN_HOST\" \"$REDESIGN_SLUG\" --force \"${scope[@]}\" || true",
+    "npx --yes vercel deploy --prod --yes \"${scope[@]}\" \"${build_env[@]}\" | tee /tmp/vercel-deploy.out",
     "deployment_url=$(grep -Eo 'https://[^[:space:]]+\\.vercel\\.app[^[:space:]]*' /tmp/vercel-deploy.out | tail -n 1)",
     "[ -n \"$deployment_url\" ]",
     "echo \"Deployment URL: $deployment_url\"",
     "npx --yes vercel inspect \"$deployment_url\" --wait --timeout 5m \"${scope[@]}\" | tee /tmp/vercel-inspect.out",
-    "npx --yes vercel domains add \"$REDESIGN_HOST\" \"$REDESIGN_SLUG\" --force \"${scope[@]}\" || true",
-    "npx --yes vercel alias set \"$deployment_url\" \"$REDESIGN_HOST\" \"${scope[@]}\"",
+    "curl --fail --silent --show-error --retry 30 --retry-delay 2 --retry-all-errors \"https://$REDESIGN_HOST\" >/dev/null",
     "echo \"Redesign URL: https://$REDESIGN_HOST\"",
   ].join("\n"), {
     env: {
@@ -475,7 +496,26 @@ function sumUsage(usages: Usage[]) {
   } satisfies Usage);
 }
 
+async function recordUsage() {
+  const usageByModel = await estimateUsage();
+  await replaceRunSessions(runId, usageByModel.filter((usage) => usage.model).map((usage) => ({
+    model: usage.model ?? "",
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    cacheReadTokens: usage.cachedInputTokens,
+    cacheWriteTokens: usage.cacheCreationInputTokens,
+    totalTokens: usage.inputTokens + usage.outputTokens + usage.cachedInputTokens + usage.cacheCreationInputTokens,
+    inputCost: usage.inputCost,
+    outputCost: usage.outputCost,
+    cacheReadCost: usage.cacheReadCost,
+    cacheWriteCost: usage.cacheWriteCost,
+    totalCost: usage.totalCost,
+  })));
+  return { usageByModel, totalUsage: sumUsage(usageByModel) };
+}
+
 async function deleteAiGatewayKey() {
+  if (aiGatewayKeyPooled) return;
   const token = process.env.VERCEL_TOKEN;
   if (!token) return;
   const params = new URLSearchParams();
@@ -500,33 +540,50 @@ async function main() {
     startedAt,
     status: "setup",
     researchModel: RESEARCH_MODEL,
-    draftModel: DRAFT_MODEL,
-    implementationModel: REPAIR_MODEL,
+    buildModel: BUILD_MODEL,
+    repairModel: REPAIR_MODEL,
   });
 
-  await installOpenCode();
   await seedTemplate();
-  await setupOpenCode();
 
   await updateRun({ status: "precollect" });
   await collectResearch();
+  const imageContactSheets = await createBuildAssetPack();
+  await commitAll("chore: add scraped research inputs");
+  const hasHomepageScreenshot = await captureHomepageScreenshot();
   await write("/tmp/research-prompt.md", buildResearchPrompt());
-  await write("/tmp/draft-prompt.md", buildDraftPrompt());
 
   await updateRun({ status: "research" });
   const research = await runOpenCodePhase("research", RESEARCH_MODEL, ["run", "Follow the attached redesign prompt.", "--auto", "--dir", WORKDIR, "--title", `Research ${slug}`, "--agent", RESEARCH_AGENT, "--file", "/tmp/research-prompt.md"], {
     agent: RESEARCH_AGENT,
-    deliverableDelivered: async () => (await sh("test -s proof.md", { allowFailure: true })).exitCode === 0,
+    deliverableDelivered: async () => {
+      try {
+        const proof = await readFile(`${WORKDIR}/proof.md`, "utf8");
+        extractOutreachProof(proof);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    retryMessage: "Finish proof.md with exactly three Outreach bullets and the complete grounded proof.",
   });
   await commitAll("chore: add proof");
 
-  await updateRun({ status: "draft", researchAttempts: research.attempts });
-  const draft = await runOpenCodePhase("draft", DRAFT_MODEL, ["run", "Follow the attached first-draft prompt.", "--auto", "--dir", WORKDIR, "--title", `Draft ${slug}`, "--agent", DRAFT_AGENT, "--file", "/tmp/draft-prompt.md"], {
-    agent: DRAFT_AGENT,
-    deliverableDelivered: async () => (await sh("git diff --quiet -- app/page.tsx", { allowFailure: true })).exitCode === 1,
+  await write("/tmp/implementation-prompt.md", buildImplementationPrompt(imageContactSheets.length > 0, hasHomepageScreenshot));
+
+  const proofSentences = extractOutreachProof(await readFile(`${WORKDIR}/proof.md`, "utf8"));
+  const globalsBeforeImplementation = await readFile(`${WORKDIR}/app/globals.css`, "utf8");
+  const implementationArgs = ["run", "Follow the attached implementation prompt.", "--auto", "--dir", WORKDIR, "--title", `Build ${slug}`, "--agent", BUILD_AGENT, "--file", "/tmp/implementation-prompt.md"];
+  for (const sheet of imageContactSheets) implementationArgs.push("--file", sheet);
+  if (hasHomepageScreenshot) implementationArgs.push("--file", HOMEPAGE_SCREENSHOT);
+  await updateRun({ status: "implementation", researchAttempts: research.attempts, proofSentences });
+  const implementation = await runOpenCodePhase("implementation", BUILD_MODEL, implementationArgs, {
+    agent: BUILD_AGENT,
+    deliverableDelivered: () => implementationDelivered(globalsBeforeImplementation),
+    maxContinues: 0,
   });
 
-  await updateRun({ status: "build", draftAttempts: draft.attempts });
+  await updateRun({ status: "build", implementationAttempts: implementation.attempts });
   const build = await buildWithRepairs();
 
   await updateRun({ status: "commit", buildCommands: build.builds, repairCommands: build.repairs });
@@ -537,34 +594,14 @@ async function main() {
 
   const endedAt = new Date().toISOString();
   const wallTimeSeconds = Math.round((Date.parse(endedAt) - Date.parse(startedAt)) / 1000);
-  let usageByModel: Usage[] | undefined;
-  let totalUsage: Usage | undefined;
-  try {
-    usageByModel = await estimateUsage();
-    totalUsage = sumUsage(usageByModel);
-    await replaceRunSessions(runId, usageByModel.filter((usage) => usage.model).map((usage) => ({
-      model: usage.model ?? "",
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
-      cacheReadTokens: usage.cachedInputTokens,
-      cacheWriteTokens: usage.cacheCreationInputTokens,
-      totalTokens: usage.inputTokens + usage.outputTokens + usage.cachedInputTokens + usage.cacheCreationInputTokens,
-      inputCost: usage.inputCost,
-      outputCost: usage.outputCost,
-      cacheReadCost: usage.cacheReadCost,
-      cacheWriteCost: usage.cacheWriteCost,
-      totalCost: usage.totalCost,
-    })));
-  } catch {
-    // Usage is best-effort; OpenCode's DB or sqlite may be unavailable.
-  }
+  const { usageByModel, totalUsage } = await recordUsage();
 
   await updateRun({
     status: "succeeded",
     endedAt,
     wallTimeSeconds,
     redesignUrl,
-    aiGatewayKeyDeletedAt: new Date().toISOString(),
+    aiGatewayKeyDeletedAt: aiGatewayKeyPooled ? undefined : new Date().toISOString(),
   });
   await deleteAiGatewayKey();
 
@@ -573,29 +610,29 @@ async function main() {
   console.log(`GitHub repo: ${repoUrl}`);
   console.log(`Slug: ${slug}`);
   console.log(`Wall time: ${wallTimeSeconds}s`);
-  if (usageByModel && totalUsage) {
-    for (const usage of usageByModel) {
-      console.log(`\nModel: ${usage.model}`);
-      console.log(`Tokens: input ${usage.inputTokens.toLocaleString("en-US")}, output ${usage.outputTokens.toLocaleString("en-US")}, cache read ${usage.cachedInputTokens.toLocaleString("en-US")}, cache write ${usage.cacheCreationInputTokens.toLocaleString("en-US")}`);
-      console.log(`OpenCode sessions: ${usage.requestCount}`);
-      console.log(`Estimated total: ${money(usage.totalCost)}`);
-    }
-    console.log(`\nCombined OpenCode sessions: ${totalUsage.requestCount}`);
-    console.log(`Combined estimated total: ${money(totalUsage.totalCost)}`);
-  } else {
-    console.log("Estimated usage: unavailable from OpenCode session data");
+  for (const usage of usageByModel) {
+    console.log(`\nModel: ${usage.model}`);
+    console.log(`Tokens: input ${usage.inputTokens.toLocaleString("en-US")}, output ${usage.outputTokens.toLocaleString("en-US")}, cache read ${usage.cachedInputTokens.toLocaleString("en-US")}, cache write ${usage.cacheCreationInputTokens.toLocaleString("en-US")}`);
+    console.log(`OpenCode sessions: ${usage.requestCount}`);
+    console.log(`Estimated total: ${money(usage.totalCost)}`);
   }
+  console.log(`\nCombined OpenCode sessions: ${totalUsage.requestCount}`);
+  console.log(`Combined estimated total: ${money(totalUsage.totalCost)}`);
   console.log(`AI Gateway budget: $${aiGatewayBudget}`);
 }
 
 main().catch(async (error: unknown) => {
   const endedAt = new Date().toISOString();
+  await commitSessionLogs().catch(() => {});
+  await recordUsage().catch((usageError: unknown) => {
+    console.error(`Usage recording failed: ${usageError instanceof Error ? usageError.message : String(usageError)}`);
+  });
   await deleteAiGatewayKey();
   await updateRun({
     status: "failed",
     endedAt,
     wallTimeSeconds: Math.round((Date.parse(endedAt) - Date.parse(startedAt)) / 1000),
-    aiGatewayKeyDeletedAt: new Date().toISOString(),
+    aiGatewayKeyDeletedAt: aiGatewayKeyPooled ? undefined : new Date().toISOString(),
     error: error instanceof Error ? error.message : String(error),
   }).catch(() => {});
   console.error(error instanceof Error ? error.message : String(error));

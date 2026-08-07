@@ -4,6 +4,7 @@ node_modules/
 .env.local
 .vercel/
 .vercel
+.data/
 .env*
 !.env.example
 log-relay/.dev.vars

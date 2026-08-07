@@ -30,6 +30,13 @@ export type BusinessSeed = {
   reviewCount?: number | null;
 };
 
+export type ContactMethodSeed = {
+  type: "email" | "contact_form" | "phone";
+  value: string;
+  verificationStatus?: string | null;
+  catchAll?: boolean | null;
+};
+
 export type DiscoveredBusinessSeed = {
   googlePlaceId: string;
   googleBusinessStatus?: string | null;
@@ -96,6 +103,7 @@ export type RunCompletionRecord = {
   error: string | null;
   totalCost: number | null;
   redesignUrl: string | null;
+  proofSentences: string[];
 };
 
 export type WebsiteSeed = {
@@ -163,6 +171,7 @@ export async function ensureSchema() {
     `;
     await db`alter table businesses add column if not exists email text`;
     await db`alter table businesses add column if not exists contact_form_url text`;
+    await db`alter table businesses add column if not exists phone text`;
     await db`alter table businesses add column if not exists google_place_id text`;
     await db`alter table businesses add column if not exists google_business_status text`;
     await db`alter table businesses add column if not exists email_verification_status text`;
@@ -174,14 +183,87 @@ export async function ensureSchema() {
       where google_place_id is not null
     `;
     await db`
+      create table if not exists contact_methods (
+        id text primary key,
+        business_id text not null references businesses(id) on delete cascade,
+        type text not null check (type in ('email', 'contact_form', 'phone')),
+        value text not null,
+        verification_status text,
+        catch_all boolean,
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now(),
+        unique (business_id, type, value)
+      )
+    `;
+    await db`alter table contact_methods add column if not exists id text`;
+    await db`alter table contact_methods add column if not exists verification_status text`;
+    await db`alter table contact_methods add column if not exists catch_all boolean`;
+    await db`alter table contact_methods add column if not exists created_at timestamptz not null default now()`;
+    await db`alter table contact_methods add column if not exists updated_at timestamptz not null default now()`;
+    await db`update contact_methods set id = 'cm_' || gen_random_uuid() where id is null`;
+    await db`alter table contact_methods alter column id set not null`;
+    await db`
+      do $$
+      begin
+        if not exists (
+          select 1 from pg_constraint
+          where conrelid = 'contact_methods'::regclass
+            and contype = 'p'
+            and conkey = array[(select attnum from pg_attribute where attrelid = 'contact_methods'::regclass and attname = 'id')]::smallint[]
+        ) then
+          alter table contact_methods drop constraint if exists contact_methods_pkey;
+          alter table contact_methods add primary key (id);
+        end if;
+      end $$
+    `;
+    await db`create unique index if not exists contact_methods_business_type_value_idx on contact_methods (business_id, type, value)`;
+    await db`
+      insert into contact_methods (id, business_id, type, value, verification_status, catch_all)
+      select 'cm_' || gen_random_uuid(), id, 'email', lower(email), email_verification_status, email_catch_all
+      from businesses where email is not null
+      union all
+      select 'cm_' || gen_random_uuid(), id, 'contact_form', contact_form_url, null, null
+      from businesses where contact_form_url is not null
+      union all
+      select 'cm_' || gen_random_uuid(), id, 'phone', phone, null, null
+      from businesses where phone is not null
+      on conflict (business_id, type, value) do update set
+        verification_status = coalesce(excluded.verification_status, contact_methods.verification_status),
+        catch_all = coalesce(excluded.catch_all, contact_methods.catch_all),
+        updated_at = now()
+    `;
+    await db`
       create table if not exists business_discoveries (
+        id text primary key,
         business_id text not null references businesses(id) on delete cascade,
         category text not null,
         area text not null,
         discovered_at timestamptz not null default now(),
-        primary key (business_id, category, area)
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now(),
+        unique (business_id, category, area)
       )
     `;
+    await db`alter table business_discoveries add column if not exists id text`;
+    await db`alter table business_discoveries add column if not exists created_at timestamptz not null default now()`;
+    await db`alter table business_discoveries add column if not exists updated_at timestamptz not null default now()`;
+    await db`update business_discoveries set id = 'dis_' || gen_random_uuid() where id is null`;
+    await db`alter table business_discoveries alter column id set not null`;
+    await db`
+      do $$
+      begin
+        if not exists (
+          select 1 from pg_constraint
+          where conrelid = 'business_discoveries'::regclass
+            and contype = 'p'
+            and conkey = array[(select attnum from pg_attribute where attrelid = 'business_discoveries'::regclass and attname = 'id')]::smallint[]
+        ) then
+          alter table business_discoveries drop constraint if exists business_discoveries_pkey;
+          alter table business_discoveries add primary key (id);
+        end if;
+      end $$
+    `;
+    await db`create unique index if not exists business_discoveries_business_category_area_idx on business_discoveries (business_id, category, area)`;
     await db`
       create table if not exists websites (
         id text primary key,
@@ -338,9 +420,9 @@ export async function listBusinessesForDiscoveryQualification(): Promise<Discove
 export async function recordBusinessDiscovery(businessId: string, category: string, area: string): Promise<void> {
   await ensureSchema();
   await sql()`
-    insert into business_discoveries (business_id, category, area)
-    values (${businessId}, ${category}, ${area})
-    on conflict do nothing
+    insert into business_discoveries (id, business_id, category, area)
+    values (${id("dis")}, ${businessId}, ${category}, ${area})
+    on conflict (business_id, category, area) do update set updated_at = now()
   `;
 }
 
@@ -354,9 +436,13 @@ export async function listDiscoveryFunnel(): Promise<DiscoveryFunnelRow[]> {
       count(distinct b.id) filter (where b.website is not null) as with_website,
       count(distinct b.id) filter (where b.email_verification_status = 'verified') as verified_email,
       count(distinct b.id) filter (where b.email_verification_status = 'verified' and b.email_catch_all is true) as verified_catch_all,
-      count(distinct b.id) filter (where b.contact_form_url is not null) as contact_form,
+      count(distinct b.id) filter (where exists (
+        select 1 from contact_methods cm where cm.business_id = b.id and cm.type = 'contact_form'
+      )) as contact_form,
       count(distinct b.id) filter (
-        where b.email_verification_status = 'verified' or b.contact_form_url is not null
+        where b.email_verification_status = 'verified' or exists (
+          select 1 from contact_methods cm where cm.business_id = b.id and cm.type = 'contact_form'
+        )
       ) as contactable,
       count(distinct b.id) filter (where b.email_verification_status = 'invalid') as invalid_email
     from business_discoveries d
@@ -394,6 +480,8 @@ export async function updateBusinessDiscoveryContactInfo(
   input: {
     email?: string;
     contactFormUrl?: string;
+    phone?: string;
+    contactMethods?: ContactMethodSeed[];
     emailVerificationStatus?: string;
     emailCatchAll?: boolean | null;
   },
@@ -403,6 +491,7 @@ export async function updateBusinessDiscoveryContactInfo(
     update businesses set
       email = coalesce(${input.email ?? null}, email),
       contact_form_url = coalesce(${input.contactFormUrl ?? null}, contact_form_url),
+      phone = coalesce(${input.phone ?? null}, phone),
       email_verification_status = case
         when ${input.email !== undefined} then ${input.emailVerificationStatus ?? null}
         else email_verification_status
@@ -415,20 +504,55 @@ export async function updateBusinessDiscoveryContactInfo(
       updated_at = now()
     where id = ${businessId}
   `;
+  const methods = input.contactMethods ?? [];
+  await upsertContactMethods(businessId, input.email ? [
+    ...methods,
+    {
+      type: "email",
+      value: input.email.toLowerCase(),
+      verificationStatus: input.emailVerificationStatus,
+      catchAll: input.emailCatchAll,
+    },
+  ] : methods);
 }
 
 export async function updateBusinessContactInfo(
   businessId: string,
-  input: Pick<BusinessSeed, "email" | "contactFormUrl">,
+  input: Pick<BusinessSeed, "email" | "contactFormUrl" | "phone"> & { contactMethods?: ContactMethodSeed[] },
 ): Promise<void> {
-  if (!input.email && !input.contactFormUrl) return;
+  if (!input.email && !input.contactFormUrl && !input.phone && !input.contactMethods?.length) return;
   await ensureSchema();
   await sql()`
     update businesses set
-      email = coalesce(${input.email ?? null}, email),
-      contact_form_url = coalesce(${input.contactFormUrl ?? null}, contact_form_url),
+      email = coalesce(email, ${input.email ?? null}),
+      contact_form_url = coalesce(contact_form_url, ${input.contactFormUrl ?? null}),
+      phone = coalesce(phone, ${input.phone ?? null}),
       updated_at = now()
     where id = ${businessId}
+  `;
+  await upsertContactMethods(businessId, input.contactMethods ?? []);
+}
+
+export async function upsertContactMethods(businessId: string, methods: ContactMethodSeed[]): Promise<void> {
+  const unique = [...new Map(methods
+    .filter(({ value }) => value.trim())
+    .map((method) => [`${method.type}\0${method.value}`, method])).values()];
+  if (!unique.length) return;
+  await ensureSchema();
+  await sql()`
+    insert into contact_methods (id, business_id, type, value, verification_status, catch_all)
+    select
+      'cm_' || gen_random_uuid(),
+      ${businessId},
+      item->>'type',
+      item->>'value',
+      item->>'verificationStatus',
+      (item->>'catchAll')::boolean
+    from jsonb_array_elements(${JSON.stringify(unique)}::jsonb) as item
+    on conflict (business_id, type, value) do update set
+      verification_status = coalesce(excluded.verification_status, contact_methods.verification_status),
+      catch_all = coalesce(excluded.catch_all, contact_methods.catch_all),
+      updated_at = now()
   `;
 }
 
@@ -461,6 +585,15 @@ export async function listRedesignCandidates(): Promise<RedesignCandidateRecord[
       and b.email_verification_status = 'verified'
       and b.google_business_status is distinct from 'CLOSED_PERMANENTLY'
       and exists (select 1 from business_discoveries d where d.business_id = b.id)
+      and not exists (
+        select 1
+        from websites failed_website
+        join runs failed_run on failed_run.website_id = failed_website.id
+        where failed_website.business_id = b.id
+          and failed_run.status = 'failed'
+        group by failed_website.business_id
+        having count(*) >= 2
+      )
     order by md5(b.id)
   ` as Row[];
   return rows.map((row) => ({
@@ -494,7 +627,7 @@ export async function listExistingRedesigns(): Promise<ExistingRedesignRecord[]>
 export async function getRunCompletion(runId: string): Promise<RunCompletionRecord | undefined> {
   await ensureSchema();
   const [row] = await sql()`
-    select r.status, r.ended_at, r.error, r.total_cost, w.url as redesign_url
+    select r.status, r.ended_at, r.error, r.total_cost, r.data->'proofSentences' as proof_sentences, w.url as redesign_url
     from runs r
     join websites w on w.id = r.website_id
     where r.id = ${runId}
@@ -507,6 +640,7 @@ export async function getRunCompletion(runId: string): Promise<RunCompletionReco
     error: row.error === null ? null : String(row.error),
     totalCost: row.total_cost === null ? null : Number(row.total_cost),
     redesignUrl: row.redesign_url === null ? null : String(row.redesign_url),
+    proofSentences: Array.isArray(row.proof_sentences) ? row.proof_sentences.map(String) : [],
   };
 }
 
