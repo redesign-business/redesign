@@ -60,7 +60,7 @@ After every OpenCode invocation, the runner replaces the run's cumulative model-
 
    Output: `app/page.tsx`, theme variables in `app/globals.css`, and metadata in `app/layout.tsx`
 
-   The installed Relume source is read-only. Sol supplies typed props, copy, original images, one primary color, and one neutral palette. It cannot add named CSS classes or edit component Tailwind classes.
+   The installed Relume source is read-only. Sol supplies typed props, copy, original images, and values for Relume's existing semantic color roles. A clear saturated logo color becomes `background-tertiary`, the primary CTA fill; all other roles use one neutral palette. Sol cannot invent parallel color tokens, add named CSS classes, or edit component Tailwind classes.
 
 6. **(Code) Verify and deploy**
 
