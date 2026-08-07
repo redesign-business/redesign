@@ -21,6 +21,24 @@ export type ContactMethod = {
   value: string;
 };
 
+export function validLinkTargets(pageUrls: string[], contactMethods: ContactMethod[]) {
+  return [...new Set([
+    "/",
+    ...pageUrls,
+    ...contactMethods.map(({ type, value }) => type === "email" ? `mailto:${value}` : type === "phone" ? `tel:${value}` : value),
+  ])];
+}
+
+export function invalidPageLinks(page: string, validTargets: string[]) {
+  const ids = new Set([...page.matchAll(/\bid\s*=\s*["']([^"']+)["']/g)].map((match) => match[1]));
+  const targets = [
+    ...page.matchAll(/\b(?:url|href)\s*:\s*["'`]([^"'`]+)["'`]/g),
+    ...page.matchAll(/\bhref\s*=\s*["']([^"']+)["']/g),
+  ].map((match) => match[1]);
+  const allowed = new Set(validTargets);
+  return [...new Set(targets.filter((target) => target !== "/" && !(target.startsWith("#") && ids.has(target.slice(1))) && !allowed.has(target)))];
+}
+
 export function extractOutreachProof(markdown: string) {
   const section = markdown.match(/(?:^|\n)## Outreach\s*\n([\s\S]*?)(?=\n## |\s*$)/)?.[1] ?? "";
   const proof = section.match(/^[-*]\s+(.+)$/gm)?.map((line) => {
@@ -89,6 +107,10 @@ export async function collectResearch(site: string, workdir: string): Promise<{ 
       {
         path: `${workdir}/public/images/manifest.json`,
         content: Buffer.from(`${JSON.stringify({ sourceUrl: site, images }, null, 2)}\n`),
+      },
+      {
+        path: `${workdir}/.redesign/valid-links.json`,
+        content: Buffer.from(`${JSON.stringify({ targets: validLinkTargets(pages.map(({ url }) => url), contactInfo.contactMethods) }, null, 2)}\n`),
       },
       ...images.map((image) => ({
         path: `${workdir}/${image.localPath}`,

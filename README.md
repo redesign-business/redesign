@@ -52,7 +52,7 @@ After every OpenCode invocation, the runner replaces the run's cumulative model-
 
    Output: deterministically installed section, element, primitive, hook, and utility files plus their original sources and immutable hashes
 
-   Code may add only mechanical TypeScript compatibility annotations required by the pinned template dependencies. The original source and each exact compatibility difference remain committed for comparison.
+   Code may add only mechanical TypeScript compatibility annotations required by the pinned template dependencies and a standard size constraint to bare logo images. The original source and each exact compatibility difference remain committed for comparison.
 
 5. **(GPT-5.6 Sol, same session) Populate and theme the page**
 
@@ -60,7 +60,7 @@ After every OpenCode invocation, the runner replaces the run's cumulative model-
 
    Output: `app/page.tsx`, theme variables in `app/globals.css`, and metadata in `app/layout.tsx`
 
-   The installed Relume source is read-only. Sol supplies typed props, copy, original images, and values for Relume's existing semantic color roles. A clear saturated logo color becomes `background-tertiary`, the primary CTA fill; all other roles use one neutral palette. Sol cannot invent parallel color tokens, add named CSS classes, or edit component Tailwind classes.
+   The installed Relume source is read-only. Sol supplies typed props, copy, original images, verified destinations, and values for Relume's existing semantic color roles. A clear saturated logo color becomes `background-tertiary`, the primary CTA fill; all other roles use one neutral palette. Optional decorative props are omitted unless useful. Sol cannot invent routes or parallel color tokens, add named CSS classes, or edit component Tailwind classes.
 
 6. **(Code) Verify and deploy**
 

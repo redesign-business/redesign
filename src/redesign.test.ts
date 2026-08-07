@@ -15,7 +15,7 @@ import {
   slugFromUrl,
   websiteHost,
 } from "./redesign.js";
-import { extractContactInfo, extractOutreachProof, isLikelyLogo, normalizeSameDomainUrl, parseSrcset } from "./research.js";
+import { extractContactInfo, extractOutreachProof, invalidPageLinks, isLikelyLogo, normalizeSameDomainUrl, parseSrcset, validLinkTargets } from "./research.js";
 
 assert.equal(phaseComplete(0), true);
 assert.equal(phaseComplete(0, false), false);
@@ -40,14 +40,26 @@ assert.deepEqual(parseRelumeComponents({ content: [{ type: "text", text: [
 });
 assert.deepEqual(applyRelumeCompatibility([
   'import { motion } from "motion/react";',
+  "<img src={logo.src} alt={logo.alt} />",
   "const lineVariants = { open: { transition: { ease: \"easeInOut\" } } };",
 ].join("\n")), {
   content: [
     'import { type Variants, motion } from "motion/react";',
+    '<img className="h-8 w-auto max-w-[70vw] md:h-10" src={logo.src} alt={logo.alt} />',
     "const lineVariants: Variants = { open: { transition: { ease: \"easeInOut\" } } };",
   ].join("\n"),
-  edits: 1,
+  edits: 2,
 });
+assert.deepEqual(validLinkTargets(["https://acme.test/", "https://acme.test/contact"], [
+  { type: "email", value: "hello@acme.test" },
+  { type: "phone", value: "+17755550100" },
+]), ["/", "https://acme.test/", "https://acme.test/contact", "mailto:hello@acme.test", "tel:+17755550100"]);
+assert.deepEqual(invalidPageLinks([
+  '<section id="contact">',
+  'const nav = { url: "#contact" };',
+  'const home = { url: "/" };',
+  'const bad = { url: "/invented" };',
+].join("\n"), ["/", "https://acme.test/contact"]), ["/invented"]);
 assert.equal(relumeComponentApi("components/relume/Header1.tsx", [
   "type Props = { heading: string };",
   "export type Header1Props = Partial<Props>;",

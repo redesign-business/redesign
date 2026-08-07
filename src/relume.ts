@@ -118,14 +118,17 @@ export function parseRelumeComponents(result: unknown) {
 }
 
 export function applyRelumeCompatibility(content: string) {
-  if (!content.includes('from "motion/react"')) return { content, edits: 0 };
-  const matches = [...content.matchAll(/const\s+\w+Variants\s*=\s*\{/g)];
-  if (!matches.length) return { content, edits: 0 };
-  let compatible = content.replace(/const\s+(\w+Variants)\s*=\s*\{/g, "const $1: Variants = {");
-  if (!/import\s*{[^}]*\bVariants\b[^}]*}\s*from\s*"motion\/react";/s.test(content)) {
+  const variants = content.includes('from "motion/react"') ? [...content.matchAll(/const\s+\w+Variants\s*=\s*\{/g)] : [];
+  let compatible = variants.length ? content.replace(/const\s+(\w+Variants)\s*=\s*\{/g, "const $1: Variants = {") : content;
+  if (variants.length && !/import\s*{[^}]*\bVariants\b[^}]*}\s*from\s*"motion\/react";/s.test(content)) {
     compatible = compatible.replace(/import\s*{[^}]*}\s*from\s*"motion\/react";/s, (statement) => statement.replace("{", "{ type Variants,"));
   }
-  return { content: compatible, edits: matches.length };
+  const logos = compatible.match(/<img src=\{logo\.src\} alt=\{logo\.alt\} \/>/g) ?? [];
+  compatible = compatible.replaceAll(
+    "<img src={logo.src} alt={logo.alt} />",
+    '<img className="h-8 w-auto max-w-[70vw] md:h-10" src={logo.src} alt={logo.alt} />',
+  );
+  return { content: compatible, edits: variants.length + logos.length };
 }
 
 export function relumeComponentApi(path: string, content: string) {

@@ -5,7 +5,7 @@ import { dirname } from "node:path";
 import { replaceRunSessions, updateBusinessContactInfo, updateRunData } from "./db.js";
 import { phaseComplete, redactSessionOutput } from "./phase.js";
 import { installRelumeComponents, verifyRelumeComponents, type RelumeInstall } from "./relume.js";
-import { collectResearch as collectResearchData, extractOutreachProof } from "./research.js";
+import { collectResearch as collectResearchData, extractOutreachProof, invalidPageLinks } from "./research.js";
 
 type Usage = {
   model?: string;
@@ -128,6 +128,7 @@ function buildImplementationPrompt() {
     "Now build the finished homepage using the exact Relume components installed by code.",
     "",
     "The selected component paths and immutable hashes are listed in .redesign/relume-install.json. Their compact prop API is in .redesign/relume-api.md.",
+    ".redesign/valid-links.json is the complete set of verified destinations from the original site. Hash links are also allowed when their matching section ID exists in app/page.tsx.",
     "Use that API to compose them in app/page.tsx. Do not read, edit, copy, consolidate, or reimplement any installed component, primitive, hook, or utility.",
     "",
     "Implementation contract:",
@@ -138,6 +139,8 @@ function buildImplementationPrompt() {
     "- If the original logo has a clear saturated color, assign it to the existing background-tertiary theme variable and give scheme-button-text an accessible neutral contrast color. Otherwise choose one restrained background-tertiary color. Use one neutral palette for every other role.",
     "- Do not add parallel primary, accent, brand, or foreground tokens, and do not add raw colors outside the existing Relume theme variables.",
     "- Use the shared Button default variant for every primary CTA. Use one CTA label consistently and do not add CTA-specific styling.",
+    "- Every link or button must use a destination from .redesign/valid-links.json or a real section ID in this page. Use an absolute original-site URL for an original subpage; never invent a local route. Omit the control if no verified destination fits.",
+    "- Omit optional decorative props by default. Add a badge, tag, icon, secondary button, or social link only when it communicates unique useful information or performs a verified action.",
     "- Preserve a strong original color or font when present and always use the original logo.",
     "- Use the strongest proof from proof.md. Adapt copy length to the installed component props and do not invent claims.",
     "- Choose original images for visual fit. Use each once, avoid near-duplicates, and use the strongest distinct work for portfolio sections.",
@@ -327,6 +330,13 @@ async function installMissingDependencies(dependencies: string[]) {
 async function validateGlobalStyles() {
   const css = await readFile(`${WORKDIR}/app/globals.css`, "utf8");
   if (/(^|[,{}]\s*)\.[A-Za-z_-][\w-]*/m.test(css)) throw new Error("app/globals.css contains named CSS classes; use Tailwind utilities instead");
+}
+
+async function validatePageLinks() {
+  const page = await readFile(`${WORKDIR}/app/page.tsx`, "utf8");
+  const { targets } = JSON.parse(await readFile(`${WORKDIR}/.redesign/valid-links.json`, "utf8")) as { targets: string[] };
+  const invalid = invalidPageLinks(page, targets);
+  if (invalid.length) throw new Error(`app/page.tsx contains unverified destinations: ${invalid.join(", ")}`);
 }
 
 async function runOpenCodePhase(
@@ -664,11 +674,13 @@ async function main() {
   });
   await verifyRelumeComponents(WORKDIR, relumeInstall);
   await validateGlobalStyles();
+  await validatePageLinks();
 
   await updateRun({ status: "build", implementationAttempts: implementation.attempts });
   const build = await buildWithRepairs();
   await verifyRelumeComponents(WORKDIR, relumeInstall);
   await validateGlobalStyles();
+  await validatePageLinks();
 
   await updateRun({ status: "commit", buildCommands: build.builds, repairCommands: build.repairs });
   await commitAll("feat: build landing page");
