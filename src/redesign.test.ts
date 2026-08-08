@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { businessSummaryFromRow } from "./db.js";
-import { phaseComplete, redactSessionOutput } from "./phase.js";
+import { isBudgetFailure, phaseComplete, redactSessionOutput } from "./phase.js";
 import { applyTheme, parsePagePlan, parseSectionSelection, parseTheme, renderLayout } from "./pipeline.js";
 import { applyRelumeCompatibility, parseRelumeComponents, relumeComponentApi } from "./relume.js";
 import {
@@ -22,6 +22,8 @@ assert.equal(phaseComplete(0), true);
 assert.equal(phaseComplete(0, false), false);
 assert.equal(phaseComplete(1, true), true);
 assert.equal(redactSessionOutput("used secret-token and ok", ["secret-token", "short"]), "used [REDACTED] and ok");
+assert.equal(isBudgetFailure("Projects delivered under budget."), false);
+assert.equal(isBudgetFailure("AI Gateway budget exceeded"), true);
 const pagePlan = parsePagePlan(JSON.stringify({
   metadata: { title: "Acme", description: "Trusted builders" },
   cta: { title: "Contact us", url: "https://acme.test/contact" },

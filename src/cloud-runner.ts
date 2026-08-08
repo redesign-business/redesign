@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { replaceRunSessions, updateBusinessContactInfo, updateRunData } from "./db.js";
-import { phaseComplete, redactSessionOutput } from "./phase.js";
+import { isBudgetFailure, phaseComplete, redactSessionOutput } from "./phase.js";
 import { applyTheme, parsePagePlan, parseSectionSelection, parseTheme, renderLayout, type PagePlan, type SectionSelection } from "./pipeline.js";
 import { installRelumeComponents, verifyRelumeComponents, type RelumeInstall } from "./relume.js";
 import { collectResearch as collectResearchData, extractOutreachProof, invalidPageLinks, relumeButtonLabelsUseChildren } from "./research.js";
@@ -107,6 +107,7 @@ function buildPagePlanPrompt() {
     "Output only this JSON shape, with no markdown:",
     '{"metadata":{"title":"...","description":"..."},"cta":{"title":"...","url":"..."},"sections":[{"id":"hero","purpose":"What this section must communicate","proof":["Exact facts this section must present"]}]}',
     "Every id must be unique kebab-case. proof may be empty only for navigation or footer. Do not choose Relume components, images, styling, or write code.",
+    "Write the file immediately. Do not explain the result or ask for approval.",
     "You are done when .redesign/page-plan.json exists.",
   ].join("\n");
 }
@@ -163,10 +164,6 @@ function buildRepairPrompt(buildOutput: string) {
     "Build output:",
     buildOutput,
   ].join("\n");
-}
-
-function isBudgetFailure(output: string) {
-  return /budget|quota|insufficient funds|payment required/i.test(output);
 }
 
 async function run(command: string, args: string[], options: { cwd?: string; env?: Record<string, string>; allowFailure?: boolean; interactive?: boolean } = {}) {
