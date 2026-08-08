@@ -106,7 +106,7 @@ function buildSectionsPrompt() {
     "Use one CTA wording and one verified destination throughout. Set cta to null only when no verified destination exists.",
     "Output only this JSON shape, with no markdown:",
     '{"metadata":{"title":"...","description":"..."},"cta":{"title":"...","url":"..."},"sections":[{"id":"hero","purpose":"What this section must communicate","proof":["Exact facts this section must present"],"relumeQuery":"Natural-language search for a Relume section that presents this proof"}]}',
-    "Every id must be unique kebab-case. proof may be empty only for navigation or footer. Make relumeQuery describe the content and composition needed, not a component slug. Do not choose components, images, styling, or write code.",
+    "Every id must be unique kebab-case. proof may be empty only for navigation or footer. relumeQuery must be two to six words: name the conventional section category and desired layout, such as `hero header background image`, `feature grid service cards`, `process timeline numbered steps`, `testimonial quote cards`, `simple navbar`, or `simple footer`. Do not choose components, images, styling, or write code.",
     "Write the file immediately. Do not explain the result or ask for approval.",
     "You are done when .redesign/sections.json exists.",
   ].join("\n");

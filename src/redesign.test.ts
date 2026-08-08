@@ -46,6 +46,8 @@ assert.deepEqual(parseImageSelection('{"imageIds":["img_home"]}', ["img_home"]),
 assert.throws(() => parseImageSelection('{"imageIds":["img_home","img_home"]}', ["img_home"]), /repeat/);
 assert.equal(firstRelumeSlug({ structuredContent: { components: [{ slug: "section_header123" }] } }), "section_header123");
 assert.equal(firstRelumeSlug({ content: [{ text: "Best match: footer12_component" }] }), "footer12_component");
+assert.equal(firstRelumeSlug({ content: [{ text: "Showing one result\n\n- grid-list5_component  —  Grid List 5" }] }), "grid-list5_component");
+assert.throws(() => firstRelumeSlug({ isError: true, content: [{ text: "Relume backend error 400" }] }), /backend error 400/);
 const theme = parseTheme(JSON.stringify({
   backgroundPrimary: "#ffffff", backgroundSecondary: "#f5f5f5", backgroundTertiary: "#336600", backgroundAlternative: "#111111",
   textPrimary: "#111111", textSecondary: "#666666", textAlternative: "#ffffff", borderPrimary: "#111111", borderSecondary: "#cccccc",

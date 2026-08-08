@@ -50,11 +50,15 @@ export function parsePagePlan(json: string, validLinks: string[]): PagePlan {
     if (!Array.isArray(section.proof) || section.proof.some((proof) => typeof proof !== "string" || !proof.trim())) {
       throw new Error(`sections[${index}].proof must contain strings`);
     }
+    const relumeQuery = string(section.relumeQuery, `sections[${index}].relumeQuery`);
+    if (relumeQuery.split(/\s+/).length > 8 || relumeQuery.length > 80) {
+      throw new Error(`sections[${index}].relumeQuery must be a concise search query of at most eight words`);
+    }
     return {
       id,
       purpose: string(section.purpose, `sections[${index}].purpose`),
       proof: section.proof.map((proof) => proof.trim()),
-      relumeQuery: string(section.relumeQuery, `sections[${index}].relumeQuery`),
+      relumeQuery,
     };
   });
   const parsedCta = cta ? { title: string(cta.title, "cta.title"), url: string(cta.url, "cta.url") } : null;

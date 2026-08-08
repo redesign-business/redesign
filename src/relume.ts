@@ -83,13 +83,17 @@ async function callRelumeTool(name: string, args: Record<string, unknown>, authP
 }
 
 export function firstRelumeSlug(result: unknown) {
+  if (result && typeof result === "object" && "isError" in result && result.isError) {
+    const message = (result as RelumeToolResult).content?.find((item) => item.text)?.text;
+    throw new Error(`Relume search failed${message ? `: ${message}` : ""}`);
+  }
   const structured: string[] = [];
   const textCandidates: string[] = [];
   const visit = (value: unknown, key?: string) => {
     if (typeof value === "string") {
       if (key?.toLowerCase() === "slug") structured.push(value);
-      const labeled = value.match(/\bslug\b["':\s]+([a-z0-9_-]+)/i)?.[1];
-      if (labeled) textCandidates.push(labeled);
+      const firstResult = value.match(/^\s*-\s+([a-z0-9][a-z0-9_-]*)\s+—/im)?.[1];
+      if (firstResult) textCandidates.push(firstResult);
       for (const match of value.matchAll(/\b(?:section_[a-z0-9_]+|(?:navbar|footer)\d+_component)\b/gi)) textCandidates.push(match[0]);
       return;
     }
