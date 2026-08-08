@@ -123,12 +123,18 @@ export function applyRelumeCompatibility(content: string) {
   if (variants.length && !/import\s*{[^}]*\bVariants\b[^}]*}\s*from\s*"motion\/react";/s.test(content)) {
     compatible = compatible.replace(/import\s*{[^}]*}\s*from\s*"motion\/react";/s, (statement) => statement.replace("{", "{ type Variants,"));
   }
-  const logos = compatible.match(/<img src=\{logo\.src\} alt=\{logo\.alt\} \/>/g) ?? [];
-  compatible = compatible.replaceAll(
-    "<img src={logo.src} alt={logo.alt} />",
-    '<img className="h-8 w-auto max-w-[70vw] md:h-10" src={logo.src} alt={logo.alt} />',
-  );
-  return { content: compatible, edits: variants.length + logos.length };
+  const logos = compatible.match(/<img\b[^>]*\bsrc=\{logo\.src\}[^>]*\/>/g) ?? [];
+  let logoEdits = 0;
+  for (const logo of logos) {
+    if (logo.includes("h-8 w-auto max-w-[70vw] md:h-10")) continue;
+    if (/\bclassName="/.test(logo)) {
+      compatible = compatible.replace(logo, logo.replace(/\bclassName="([^"]*)"/, 'className="$1 h-8 w-auto max-w-[70vw] md:h-10"'));
+    } else {
+      compatible = compatible.replace(logo, logo.replace("<img", '<img className="h-8 w-auto max-w-[70vw] md:h-10"'));
+    }
+    logoEdits += 1;
+  }
+  return { content: compatible, edits: variants.length + logoEdits };
 }
 
 export function relumeComponentApi(path: string, content: string) {

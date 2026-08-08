@@ -41,14 +41,20 @@ assert.deepEqual(parseRelumeComponents({ content: [{ type: "text", text: [
 assert.deepEqual(applyRelumeCompatibility([
   'import { motion } from "motion/react";',
   "<img src={logo.src} alt={logo.alt} />",
+  '<img src={logo.src} alt={logo.alt} className="inline-block" />',
   "const lineVariants = { open: { transition: { ease: \"easeInOut\" } } };",
 ].join("\n")), {
   content: [
     'import { type Variants, motion } from "motion/react";',
     '<img className="h-8 w-auto max-w-[70vw] md:h-10" src={logo.src} alt={logo.alt} />',
+    '<img src={logo.src} alt={logo.alt} className="inline-block h-8 w-auto max-w-[70vw] md:h-10" />',
     "const lineVariants: Variants = { open: { transition: { ease: \"easeInOut\" } } };",
   ].join("\n"),
-  edits: 2,
+  edits: 3,
+});
+assert.deepEqual(applyRelumeCompatibility('<img className="h-8 w-auto max-w-[70vw] md:h-10" src={logo.src} alt={logo.alt} />'), {
+  content: '<img className="h-8 w-auto max-w-[70vw] md:h-10" src={logo.src} alt={logo.alt} />',
+  edits: 0,
 });
 assert.deepEqual(validLinkTargets(["https://acme.test/", "https://acme.test/contact"], [
   { type: "email", value: "hello@acme.test" },
