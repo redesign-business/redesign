@@ -92,7 +92,6 @@ export function parseSectionSelection(json: string, plan: PagePlan, validImageId
     const id = string(section.id, `sections[${index}].id`);
     if (id !== plan.sections[index].id) throw new Error(`Section order mismatch at ${id}`);
     const slug = string(section.slug, `sections[${index}].slug`);
-    if (!/^[a-z0-9_]+$/.test(slug)) throw new Error(`Invalid Relume slug: ${slug}`);
     if (!Array.isArray(section.imageIds)) throw new Error(`sections[${index}].imageIds must be an array`);
     const selected = section.imageIds.map((imageId) => string(imageId, `sections[${index}].imageIds`));
     for (const imageId of selected) {

@@ -35,11 +35,11 @@ const pagePlan = parsePagePlan(JSON.stringify({
 }), ["https://acme.test/contact"]);
 assert.deepEqual(parseSectionSelection(JSON.stringify({ sections: [
   { id: "nav", slug: "navbar_1", imageIds: ["img_logo"] },
-  { id: "hero", slug: "header_1", imageIds: ["img_home"] },
+  { id: "hero", slug: "grid-list5_component", imageIds: ["img_home"] },
   { id: "footer", slug: "footer_1", imageIds: [] },
 ] }), pagePlan, ["img_logo", "img_home"]), { sections: [
   { id: "nav", slug: "navbar_1", imageIds: ["img_logo"] },
-  { id: "hero", slug: "header_1", imageIds: ["img_home"] },
+  { id: "hero", slug: "grid-list5_component", imageIds: ["img_home"] },
   { id: "footer", slug: "footer_1", imageIds: [] },
 ] });
 assert.deepEqual(parseImageSelection('{"imageIds":["img_home"]}', ["img_home"]), ["img_home"]);

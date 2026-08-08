@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { replaceRunSessions, updateBusinessContactInfo, updateRunData } from "./db.js";
 import { isBudgetFailure, phaseComplete, redactSessionOutput } from "./phase.js";
@@ -112,16 +112,16 @@ function buildSectionsPrompt() {
   ].join("\n");
 }
 
-function buildImagePrompt(inputPath: string, outputPath: string, hasImageContactSheets: boolean) {
+function buildImagePrompt(hasImageContactSheets: boolean) {
   return [
-    `Read ${inputPath} and create ${outputPath}.`,
+    "Read .redesign/image-input.md before choosing, then create .redesign/image-selection.json.",
     hasImageContactSheets
       ? "The contact sheets are attached as images. Choose only original image IDs that strongly fit this one section's proof, composition, and exact prop API. Do not read the PNG paths."
       : "No usable images are available, so return an empty array.",
     "Choose no more images than the component can actually display. Return an empty array when images add no value or the API has no content-image prop. Never choose a logo; the original logo is supplied separately.",
-    'Write exactly one JSON object: {"imageIds":["img_001"]}',
+    "Write exactly one JSON object containing only an imageIds array. Every value must be an ID listed in the input.",
     "Do not write copy or code, edit any other file, or explain the choice.",
-    `You are done when ${outputPath} exists.`,
+    "You are done when .redesign/image-selection.json exists.",
   ].join("\n");
 }
 
@@ -342,14 +342,13 @@ async function selectSectionImages(
   }
   const api = await readFile(`${WORKDIR}/.redesign/relume-api.md`, "utf8");
 
-  await Promise.all(selection.sections.map(async (selected, index) => {
+  for (const [index, selected] of selection.sections.entries()) {
     const section = plan.sections[index];
     if (selected.id !== section.id) throw new Error(`Section order mismatch at ${selected.id}`);
-    if (/^(?:navbar|footer)/i.test(selected.slug)) return;
+    if (/^(?:navbar|footer)/i.test(selected.slug)) continue;
 
-    const inputPath = `.redesign/image-inputs/${section.id}.md`;
-    const outputPath = `.redesign/image-selections/${section.id}.json`;
-    await write(`${WORKDIR}/${inputPath}`, [
+    const outputPath = `${WORKDIR}/.redesign/image-selection.json`;
+    await write(`${WORKDIR}/.redesign/image-input.md`, [
       "# Section",
       "```json",
       JSON.stringify({ ...section, slug: selected.slug }, null, 2),
@@ -361,24 +360,26 @@ async function selectSectionImages(
       JSON.stringify(images, null, 2),
       "```",
     ].join("\n\n"));
+    await unlink(outputPath).catch(() => {});
     const promptPath = `/tmp/image-${section.id}-prompt.md`;
-    await write(promptPath, buildImagePrompt(inputPath, outputPath, contactSheets.length > 0));
+    await write(promptPath, buildImagePrompt(contactSheets.length > 0));
     const args = ["run", "Follow the attached image-selection prompt.", "--auto", "--dir", WORKDIR, "--title", `Image ${section.id} ${slug}`, "--agent", IMAGE_AGENT, "--file", promptPath];
     for (const sheet of contactSheets) args.push("--file", sheet);
     await runOpenCodePhase(`image-${section.id}`, IMAGE_MODEL, args, {
       agent: IMAGE_AGENT,
       deliverableDelivered: async () => {
         try {
-          parseImageSelection(await readFile(`${WORKDIR}/${outputPath}`, "utf8"), validImageIds);
+          parseImageSelection(await readFile(outputPath, "utf8"), validImageIds);
           return true;
         } catch {
           return false;
         }
       },
-      retryMessage: `Finish ${outputPath} as {\"imageIds\":[...]}.`,
+      retryMessage: "Read .redesign/image-input.md and finish .redesign/image-selection.json using only listed image IDs.",
     });
-    selected.imageIds = parseImageSelection(await readFile(`${WORKDIR}/${outputPath}`, "utf8"), validImageIds);
-  }));
+    selected.imageIds = parseImageSelection(await readFile(outputPath, "utf8"), validImageIds);
+    await write(`${WORKDIR}/.redesign/image-selections/${section.id}.json`, `${JSON.stringify({ imageIds: selected.imageIds }, null, 2)}\n`);
+  }
 
   const used = new Set<string>();
   for (const section of selection.sections) {
