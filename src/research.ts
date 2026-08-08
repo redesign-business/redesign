@@ -31,10 +31,11 @@ export function validLinkTargets(pageUrls: string[], contactMethods: ContactMeth
 
 export function invalidPageLinks(page: string, validTargets: string[]) {
   const ids = new Set([...page.matchAll(/\bid\s*=\s*["']([^"']+)["']/g)].map((match) => match[1]));
+  const constants = new Map([...page.matchAll(/\bconst\s+(\w+)\s*=\s*["']([^"']+)["']/g)].map((match) => [match[1], match[2]]));
   const targets = [
     ...page.matchAll(/\b(?:url|href)\s*:\s*["'`]([^"'`]+)["'`]/g),
     ...page.matchAll(/\bhref\s*=\s*["']([^"']+)["']/g),
-  ].map((match) => match[1]);
+  ].map((match) => match[1].replace(/\$\{(\w+)}/g, (reference, name) => constants.get(name) ?? reference));
   const allowed = new Set(validTargets);
   return [...new Set(targets.filter((target) => target !== "/" && !(target.startsWith("#") && ids.has(target.slice(1))) && !allowed.has(target)))];
 }
@@ -89,7 +90,7 @@ const turndown = new TurndownService({
 });
 
 export async function collectResearch(site: string, workdir: string): Promise<{ files: ResearchFile[]; contactInfo: ContactInfo }> {
-  const { pages, imageCandidates, contactInfo } = await crawlSite(site, maxPages, true);
+  const { pages, discoveredLinks, imageCandidates, contactInfo } = await crawlSite(site, maxPages, true);
   const images = (await downloadImages(dedupeImages(imageCandidates)))
     .sort((left, right) => Number(right.role === "logo") - Number(left.role === "logo"))
     .map((image, index) => ({
@@ -110,7 +111,7 @@ export async function collectResearch(site: string, workdir: string): Promise<{ 
       },
       {
         path: `${workdir}/.redesign/valid-links.json`,
-        content: Buffer.from(`${JSON.stringify({ targets: validLinkTargets(pages.map(({ url }) => url), contactInfo.contactMethods) }, null, 2)}\n`),
+        content: Buffer.from(`${JSON.stringify({ targets: validLinkTargets(discoveredLinks, contactInfo.contactMethods) }, null, 2)}\n`),
       },
       ...images.map((image) => ({
         path: `${workdir}/${image.localPath}`,
@@ -130,6 +131,7 @@ async function crawlSite(site: string, pageLimit: number, collectAssets: boolean
   const seen = new Set<string>();
   const queue = [site];
   const pages: PageData[] = [];
+  const discoveredLinks = new Set([site]);
   const imageCandidates: ImageCandidate[] = [];
   const contactMethods = new Map<string, ContactMethod>();
 
@@ -152,6 +154,7 @@ async function crawlSite(site: string, pageLimit: number, collectAssets: boolean
     for (const method of inspectContactMethods($, pageUrl)) contactMethods.set(`${method.type}\0${method.value}`, method);
     const links = sameDomainLinks($, pageUrl, origin)
       .sort((left, right) => Number(!hasContactIntent(left)) - Number(!hasContactIntent(right)));
+    for (const href of links) discoveredLinks.add(href);
     for (const href of links) {
       if (!seen.has(href) && !queue.includes(href) && pages.length + queue.length < pageLimit) {
         queue.push(href);
@@ -160,7 +163,7 @@ async function crawlSite(site: string, pageLimit: number, collectAssets: boolean
     if (collectAssets) imageCandidates.push(...imageUrls($, pageUrl, page.title).slice(0, maxImagesPerPage));
   }
 
-  return { pages, imageCandidates, contactInfo: summarizeContactMethods([...contactMethods.values()], origin) };
+  return { pages, discoveredLinks: [...discoveredLinks], imageCandidates, contactInfo: summarizeContactMethods([...contactMethods.values()], origin) };
 }
 
 export function extractContactInfo(html: string, pageUrl: string): ContactInfo {

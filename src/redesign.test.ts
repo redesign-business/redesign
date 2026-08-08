@@ -56,8 +56,10 @@ assert.deepEqual(validLinkTargets(["https://acme.test/", "https://acme.test/cont
 ]), ["/", "https://acme.test/", "https://acme.test/contact", "mailto:hello@acme.test", "tel:+17755550100"]);
 assert.deepEqual(invalidPageLinks([
   '<section id="contact">',
+  'const siteUrl = "https://acme.test";',
   'const nav = { url: "#contact" };',
   'const home = { url: "/" };',
+  'const contact = { url: `${siteUrl}/contact` };',
   'const bad = { url: "/invented" };',
 ].join("\n"), ["/", "https://acme.test/contact"]), ["/invented"]);
 assert.equal(relumeComponentApi("components/relume/Header1.tsx", [
