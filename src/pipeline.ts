@@ -1,7 +1,7 @@
 export type PagePlan = {
   metadata: { title: string; description: string };
   cta: { title: string; url: string } | null;
-  sections: Array<{ id: string; purpose: string; proof: string[] }>;
+  sections: Array<{ id: string; purpose: string; proof: string[]; relumeQuery: string }>;
 };
 
 export type SectionSelection = {
@@ -37,10 +37,10 @@ function string(value: unknown, name: string) {
 }
 
 export function parsePagePlan(json: string, validLinks: string[]): PagePlan {
-  const value = object(JSON.parse(json), "page-plan.json");
+  const value = object(JSON.parse(json), "sections.json");
   const metadata = object(value.metadata, "metadata");
   const cta = value.cta === null ? null : object(value.cta, "cta");
-  if (!Array.isArray(value.sections) || value.sections.length === 0) throw new Error("page-plan.json must contain sections");
+  if (!Array.isArray(value.sections) || value.sections.length === 0) throw new Error("sections.json must contain sections");
   const ids = new Set<string>();
   const sections = value.sections.map((item, index) => {
     const section = object(item, `sections[${index}]`);
@@ -50,7 +50,12 @@ export function parsePagePlan(json: string, validLinks: string[]): PagePlan {
     if (!Array.isArray(section.proof) || section.proof.some((proof) => typeof proof !== "string" || !proof.trim())) {
       throw new Error(`sections[${index}].proof must contain strings`);
     }
-    return { id, purpose: string(section.purpose, `sections[${index}].purpose`), proof: section.proof.map((proof) => proof.trim()) };
+    return {
+      id,
+      purpose: string(section.purpose, `sections[${index}].purpose`),
+      proof: section.proof.map((proof) => proof.trim()),
+      relumeQuery: string(section.relumeQuery, `sections[${index}].relumeQuery`),
+    };
   });
   const parsedCta = cta ? { title: string(cta.title, "cta.title"), url: string(cta.url, "cta.url") } : null;
   if (parsedCta && !validLinks.includes(parsedCta.url)) throw new Error(`CTA uses an unverified destination: ${parsedCta.url}`);
@@ -59,6 +64,17 @@ export function parsePagePlan(json: string, validLinks: string[]): PagePlan {
     cta: parsedCta,
     sections,
   };
+}
+
+export function parseImageSelection(json: string, validImageIds: string[]) {
+  const value = object(JSON.parse(json), "image selection");
+  if (!Array.isArray(value.imageIds)) throw new Error("imageIds must be an array");
+  const imageIds = value.imageIds.map((imageId, index) => string(imageId, `imageIds[${index}]`));
+  if (new Set(imageIds).size !== imageIds.length) throw new Error("An image selection cannot repeat an image");
+  for (const imageId of imageIds) {
+    if (!validImageIds.includes(imageId)) throw new Error(`Unknown image ID: ${imageId}`);
+  }
+  return imageIds;
 }
 
 export function parseSectionSelection(json: string, plan: PagePlan, validImageIds: string[]): SectionSelection {

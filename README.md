@@ -40,25 +40,25 @@ After every OpenCode invocation, the runner replaces the run's cumulative model-
 
    Output: `proof.md`, freeform except for the three outreach lines consumed by deterministic storage
 
-3. **(DeepSeek V4 Flash) Plan the page**
+3. **(DeepSeek V4 Flash) Define the sections**
 
    Input: `.redesign/planning-input.md`, containing `proof.md` and verified links
 
-   Output: `.redesign/page-plan.json`, containing metadata, one shared CTA, and ordered `{ id, purpose, proof[] }` sections
+   Output: `.redesign/sections.json`, containing metadata, one shared CTA, and ordered `{ id, purpose, proof[], relumeQuery }` sections
 
-4. **(GPT-5 Nano + Relume MCP) Select components and images**
+4. **(Code + Relume MCP) Select and install components**
 
-   Input: `.redesign/selection-input.md` plus the image contact sheets
+   Input: each section's `relumeQuery`
 
-   Output: `.redesign/section-selection.json`, containing one `{ id, slug, imageIds[] }` record per planned section
+   Output: the first Relume search result for each section, its exact files, and its prop API
 
-5. **(Code) Install and package the selected components**
+5. **(GPT-5 Nano, one session per section) Select images**
 
-   Input: `.redesign/section-selection.json`
+   Input: one section, its exact component prop API, available-image records, and the image contact sheets
 
-   Output: exact Relume files plus `.redesign/page-input.md`, which combines the page plan, selected prop APIs, assigned image records, original logo, CTA, and verified links
+   Output: `.redesign/image-selections/<section-id>.json`, containing only `{ imageIds[] }`
 
-   Code installs the exact Relume sections and required primitives, preserving only the template's intentionally customized Button, utility, and media-query hook. It may add mechanical TypeScript compatibility annotations and a standard size constraint to bare logo images. Every original source and exact compatibility difference remains committed for comparison.
+   Code removes duplicate image assignments and packages the sections, exact prop APIs, assigned image records, original logo, CTA, and verified links into `.redesign/page-input.md`.
 
 6. **(DeepSeek V4 Flash) Compile the page**
 
@@ -70,7 +70,7 @@ After every OpenCode invocation, the runner replaces the run's cumulative model-
 
    Input: original screenshot and image contact sheets
 
-   Output: `.redesign/theme.json`; code applies its values to Relume's existing variables in `app/globals.css` and writes metadata from `page-plan.json` to `app/layout.tsx`
+   Output: `.redesign/theme.json`; code applies its values to Relume's existing variables in `app/globals.css` and writes metadata from `sections.json` to `app/layout.tsx`
 
 8. **(Code) Verify and deploy**
 

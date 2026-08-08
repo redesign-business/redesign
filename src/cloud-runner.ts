@@ -4,8 +4,8 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { replaceRunSessions, updateBusinessContactInfo, updateRunData } from "./db.js";
 import { isBudgetFailure, phaseComplete, redactSessionOutput } from "./phase.js";
-import { applyTheme, parsePagePlan, parseSectionSelection, parseTheme, renderLayout, type PagePlan, type SectionSelection } from "./pipeline.js";
-import { installRelumeComponents, verifyRelumeComponents, type RelumeInstall } from "./relume.js";
+import { applyTheme, parseImageSelection, parsePagePlan, parseSectionSelection, parseTheme, renderLayout, type PagePlan, type SectionSelection } from "./pipeline.js";
+import { firstRelumeSlug, installRelumeComponents, relumeApiForSlug, searchRelumeComponent, verifyRelumeComponents, type RelumeInstall } from "./relume.js";
 import { collectResearch as collectResearchData, extractOutreachProof, invalidPageLinks, relumeButtonLabelsUseChildren } from "./research.js";
 
 type Usage = {
@@ -37,13 +37,13 @@ const TEMPLATE_REPO = "https://github.com/redesign-business/template.git";
 const TEMPLATE_REF = "codex/cheap-pipeline";
 const RESEARCH_MODEL = "deepseek/deepseek-v4-flash-0731";
 const PLAN_MODEL = "deepseek/deepseek-v4-flash-0731";
-const SELECT_MODEL = "openai/gpt-5-nano";
+const IMAGE_MODEL = "openai/gpt-5-nano";
 const PAGE_MODEL = "deepseek/deepseek-v4-flash-0731";
 const THEME_MODEL = "openai/gpt-5-nano";
 const REPAIR_MODEL = "deepseek/deepseek-v4-flash-0731";
 const RESEARCH_AGENT = "research";
 const PLAN_AGENT = "planner";
-const SELECT_AGENT = "select";
+const IMAGE_AGENT = "image";
 const PAGE_AGENT = "page";
 const THEME_AGENT = "theme";
 const REPAIR_AGENT = "repair";
@@ -99,31 +99,29 @@ function buildResearchPrompt() {
   ].join("\n");
 }
 
-function buildPagePlanPrompt() {
+function buildSectionsPrompt() {
   return [
-    "Read .redesign/planning-input.md and create .redesign/page-plan.json.",
+    "Read .redesign/planning-input.md and create .redesign/sections.json.",
     "Decide the fewest purposeful landing-page sections that present every distinct useful proof point. Include a navbar first and footer last. Combine related proof; do not pad or invent claims.",
     "Use one CTA wording and one verified destination throughout. Set cta to null only when no verified destination exists.",
     "Output only this JSON shape, with no markdown:",
-    '{"metadata":{"title":"...","description":"..."},"cta":{"title":"...","url":"..."},"sections":[{"id":"hero","purpose":"What this section must communicate","proof":["Exact facts this section must present"]}]}',
-    "Every id must be unique kebab-case. proof may be empty only for navigation or footer. Do not choose Relume components, images, styling, or write code.",
+    '{"metadata":{"title":"...","description":"..."},"cta":{"title":"...","url":"..."},"sections":[{"id":"hero","purpose":"What this section must communicate","proof":["Exact facts this section must present"],"relumeQuery":"Natural-language search for a Relume section that presents this proof"}]}',
+    "Every id must be unique kebab-case. proof may be empty only for navigation or footer. Make relumeQuery describe the content and composition needed, not a component slug. Do not choose components, images, styling, or write code.",
     "Write the file immediately. Do not explain the result or ask for approval.",
-    "You are done when .redesign/page-plan.json exists.",
+    "You are done when .redesign/sections.json exists.",
   ].join("\n");
 }
 
-function buildSelectionPrompt(hasImageContactSheets: boolean) {
+function buildImagePrompt(inputPath: string, outputPath: string, hasImageContactSheets: boolean) {
   return [
-    "Read .redesign/selection-input.md. For each planned section, search Relume with a natural-language description and choose the best-fitting unmodified component.",
-    "Do not guess category slugs. Call list_categories only if natural-language search fails or a tool requires it. Do not call get_components.",
-    "Compare at least three relevant search results for each section before choosing. Never choose from a one-result search.",
+    `Read ${inputPath} and create ${outputPath}.`,
     hasImageContactSheets
-      ? "The contact sheets are already attached as images: inspect them directly and do not call Read on their PNG paths. Assign only the strongest relevant image IDs to content-image sections, use every image at most once, and do not default to early IDs. Leave navbar, footer, and logo-section imageIds empty; the original logo is supplied separately."
-      : "No usable images are available; use empty imageIds arrays.",
-    "Write .redesign/section-selection.json with exactly the same section IDs and order as the input:",
-    '{"sections":[{"id":"hero","slug":"section_header1","imageIds":["img_001"]}]}',
-    "Create the file immediately with the Write tool; do not try to update a file that does not exist. The output is only a selection. Do not write copy or code, retrieve source, install, build, or edit the website.",
-    "You are done when .redesign/section-selection.json exists.",
+      ? "The contact sheets are attached as images. Choose only original image IDs that strongly fit this one section's proof, composition, and exact prop API. Do not read the PNG paths."
+      : "No usable images are available, so return an empty array.",
+    "Choose no more images than the component can actually display. Return an empty array when images add no value or the API has no content-image prop. Never choose a logo; the original logo is supplied separately.",
+    'Write exactly one JSON object: {"imageIds":["img_001"]}',
+    "Do not write copy or code, edit any other file, or explain the choice.",
+    `You are done when ${outputPath} exists.`,
   ].join("\n");
 }
 
@@ -306,12 +304,7 @@ async function buildImages() {
 }
 
 async function readPagePlan() {
-  return parsePagePlan(await readFile(`${WORKDIR}/.redesign/page-plan.json`, "utf8"), await validLinks());
-}
-
-async function readSectionSelection(plan: PagePlan) {
-  const images = (await buildImages()).filter((image) => image.role !== "logo");
-  return parseSectionSelection(await readFile(`${WORKDIR}/.redesign/section-selection.json`, "utf8"), plan, images.map((image) => image.id));
+  return parsePagePlan(await readFile(`${WORKDIR}/.redesign/sections.json`, "utf8"), await validLinks());
 }
 
 async function createPlanningInput() {
@@ -325,17 +318,78 @@ async function createPlanningInput() {
   ].join("\n\n"));
 }
 
-async function createSelectionInput(plan: PagePlan) {
-  await write(`${WORKDIR}/.redesign/selection-input.md`, [
-    "# Page plan",
-    "```json",
-    JSON.stringify(plan, null, 2),
-    "```",
-    "# Available original images",
-    "```json",
-    JSON.stringify((await buildImages()).filter((image) => image.role !== "logo"), null, 2),
-    "```",
-  ].join("\n\n"));
+async function selectRelumeComponents(plan: PagePlan) {
+  const sections = await Promise.all(plan.sections.map(async (section) => {
+    const result = await searchRelumeComponent(section.relumeQuery);
+    await write(`${WORKDIR}/.redesign/relume-searches/${section.id}.json`, `${JSON.stringify(result, null, 2)}\n`);
+    return { id: section.id, slug: firstRelumeSlug(result), imageIds: [] as string[] };
+  }));
+  const selection = { sections } satisfies SectionSelection;
+  await write(`${WORKDIR}/.redesign/relume-selection.json`, `${JSON.stringify(selection, null, 2)}\n`);
+  return selection;
+}
+
+async function selectSectionImages(
+  plan: PagePlan,
+  selection: SectionSelection,
+  contactSheets: string[],
+) {
+  const images = (await buildImages()).filter((image) => image.role !== "logo");
+  const validImageIds = images.map((image) => image.id);
+  if (!contactSheets.length || !images.length) {
+    await write(`${WORKDIR}/.redesign/section-selection.json`, `${JSON.stringify(selection, null, 2)}\n`);
+    return selection;
+  }
+  const api = await readFile(`${WORKDIR}/.redesign/relume-api.md`, "utf8");
+
+  await Promise.all(selection.sections.map(async (selected, index) => {
+    const section = plan.sections[index];
+    if (selected.id !== section.id) throw new Error(`Section order mismatch at ${selected.id}`);
+    if (/^(?:navbar|footer)/i.test(selected.slug)) return;
+
+    const inputPath = `.redesign/image-inputs/${section.id}.md`;
+    const outputPath = `.redesign/image-selections/${section.id}.json`;
+    await write(`${WORKDIR}/${inputPath}`, [
+      "# Section",
+      "```json",
+      JSON.stringify({ ...section, slug: selected.slug }, null, 2),
+      "```",
+      "# Exact component prop API",
+      relumeApiForSlug(api, selected.slug),
+      "# Available original images",
+      "```json",
+      JSON.stringify(images, null, 2),
+      "```",
+    ].join("\n\n"));
+    const promptPath = `/tmp/image-${section.id}-prompt.md`;
+    await write(promptPath, buildImagePrompt(inputPath, outputPath, contactSheets.length > 0));
+    const args = ["run", "Follow the attached image-selection prompt.", "--auto", "--dir", WORKDIR, "--title", `Image ${section.id} ${slug}`, "--agent", IMAGE_AGENT, "--file", promptPath];
+    for (const sheet of contactSheets) args.push("--file", sheet);
+    await runOpenCodePhase(`image-${section.id}`, IMAGE_MODEL, args, {
+      agent: IMAGE_AGENT,
+      deliverableDelivered: async () => {
+        try {
+          parseImageSelection(await readFile(`${WORKDIR}/${outputPath}`, "utf8"), validImageIds);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      retryMessage: `Finish ${outputPath} as {\"imageIds\":[...]}.`,
+    });
+    selected.imageIds = parseImageSelection(await readFile(`${WORKDIR}/${outputPath}`, "utf8"), validImageIds);
+  }));
+
+  const used = new Set<string>();
+  for (const section of selection.sections) {
+    section.imageIds = section.imageIds.filter((imageId) => {
+      if (used.has(imageId)) return false;
+      used.add(imageId);
+      return true;
+    });
+  }
+  await write(`${WORKDIR}/.redesign/section-selection.json`, `${JSON.stringify(selection, null, 2)}\n`);
+  return parseSectionSelection(JSON.stringify(selection), plan, validImageIds);
 }
 
 async function createPageInput(plan: PagePlan, selection: SectionSelection) {
@@ -682,7 +736,7 @@ async function main() {
     status: "setup",
     researchModel: RESEARCH_MODEL,
     planModel: PLAN_MODEL,
-    selectionModel: SELECT_MODEL,
+    imageModel: IMAGE_MODEL,
     pageModel: PAGE_MODEL,
     themeModel: THEME_MODEL,
     repairModel: REPAIR_MODEL,
@@ -717,9 +771,9 @@ async function main() {
 
   const proofSentences = extractOutreachProof(await readFile(`${WORKDIR}/proof.md`, "utf8"));
   await createPlanningInput();
-  await write("/tmp/page-plan-prompt.md", buildPagePlanPrompt());
+  await write("/tmp/sections-prompt.md", buildSectionsPrompt());
   await updateRun({ status: "planning", researchAttempts: research.attempts, proofSentences });
-  const planning = await runOpenCodePhase("planning", PLAN_MODEL, ["run", "Follow the attached page-planning prompt.", "--auto", "--dir", WORKDIR, "--title", `Plan ${slug}`, "--agent", PLAN_AGENT, "--file", "/tmp/page-plan-prompt.md"], {
+  const planning = await runOpenCodePhase("planning", PLAN_MODEL, ["run", "Follow the attached section-planning prompt.", "--auto", "--dir", WORKDIR, "--title", `Plan ${slug}`, "--agent", PLAN_AGENT, "--file", "/tmp/sections-prompt.md"], {
     agent: PLAN_AGENT,
     deliverableDelivered: async () => {
       try {
@@ -729,38 +783,23 @@ async function main() {
         return false;
       }
     },
-    retryMessage: "Finish .redesign/page-plan.json in the exact required JSON shape.",
+    retryMessage: "Finish .redesign/sections.json in the exact required JSON shape.",
   });
 
   const plan = await readPagePlan();
-  await createSelectionInput(plan);
-  await write("/tmp/section-selection-prompt.md", buildSelectionPrompt(imageContactSheets.length > 0));
-  const selectionArgs = ["run", "Follow the attached section-selection prompt.", "--auto", "--dir", WORKDIR, "--title", `Select ${slug}`, "--agent", SELECT_AGENT, "--file", "/tmp/section-selection-prompt.md"];
-  for (const sheet of imageContactSheets) selectionArgs.push("--file", sheet);
-  await updateRun({ status: "selection", planningAttempts: planning.attempts });
-  const selecting = await runOpenCodePhase("selection", SELECT_MODEL, selectionArgs, {
-    agent: SELECT_AGENT,
-    deliverableDelivered: async () => {
-      try {
-        await readSectionSelection(plan);
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    retryMessage: "Finish .redesign/section-selection.json with every planned section in order and valid unique image IDs.",
-  });
-
-  const selection = await readSectionSelection(plan);
-  const relumeSlugs = [...new Set(selection.sections.map((section) => section.slug))];
+  await updateRun({ status: "relume", planningAttempts: planning.attempts });
   await run(OPENCODE_BIN, ["mcp", "list"], { cwd: WORKDIR });
+  const relumeSelection = await selectRelumeComponents(plan);
+  const relumeSlugs = [...new Set(relumeSelection.sections.map((section) => section.slug))];
   const relumeInstall: RelumeInstall = await installRelumeComponents(WORKDIR, relumeSlugs);
   await installMissingDependencies(relumeInstall.dependencies);
   await commitAll("chore: install selected relume components");
 
+  await updateRun({ status: "images", relumeComponents: relumeSlugs });
+  const selection = await selectSectionImages(plan, relumeSelection, imageContactSheets);
   await createPageInput(plan, selection);
   await write("/tmp/page-prompt.md", buildPagePrompt());
-  await updateRun({ status: "page", selectionAttempts: selecting.attempts, relumeComponents: relumeSlugs });
+  await updateRun({ status: "page" });
   const page = await runOpenCodePhase("page", PAGE_MODEL, ["run", "Follow the attached page prompt.", "--auto", "--dir", WORKDIR, "--title", `Build page ${slug}`, "--agent", PAGE_AGENT, "--file", "/tmp/page-prompt.md"], {
     agent: PAGE_AGENT,
     deliverableDelivered: pageDelivered,

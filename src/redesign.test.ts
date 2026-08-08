@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { businessSummaryFromRow } from "./db.js";
 import { isBudgetFailure, phaseComplete, redactSessionOutput } from "./phase.js";
-import { applyTheme, parsePagePlan, parseSectionSelection, parseTheme, renderLayout } from "./pipeline.js";
-import { applyRelumeCompatibility, parseRelumeComponents, relumeComponentApi } from "./relume.js";
+import { applyTheme, parseImageSelection, parsePagePlan, parseSectionSelection, parseTheme, renderLayout } from "./pipeline.js";
+import { applyRelumeCompatibility, firstRelumeSlug, parseRelumeComponents, relumeApiForSlug, relumeComponentApi } from "./relume.js";
 import {
   githubRepoFromUrl,
   makeSandboxName,
@@ -28,9 +28,9 @@ const pagePlan = parsePagePlan(JSON.stringify({
   metadata: { title: "Acme", description: "Trusted builders" },
   cta: { title: "Contact us", url: "https://acme.test/contact" },
   sections: [
-    { id: "nav", purpose: "Navigation", proof: [] },
-    { id: "hero", purpose: "Lead with experience", proof: ["Built 500 homes."] },
-    { id: "footer", purpose: "Footer", proof: [] },
+    { id: "nav", purpose: "Navigation", proof: [], relumeQuery: "simple navbar with logo and CTA" },
+    { id: "hero", purpose: "Lead with experience", proof: ["Built 500 homes."], relumeQuery: "image-led hero for a trusted builder" },
+    { id: "footer", purpose: "Footer", proof: [], relumeQuery: "simple footer with logo and navigation" },
   ],
 }), ["https://acme.test/contact"]);
 assert.deepEqual(parseSectionSelection(JSON.stringify({ sections: [
@@ -42,6 +42,10 @@ assert.deepEqual(parseSectionSelection(JSON.stringify({ sections: [
   { id: "hero", slug: "header_1", imageIds: ["img_home"] },
   { id: "footer", slug: "footer_1", imageIds: [] },
 ] });
+assert.deepEqual(parseImageSelection('{"imageIds":["img_home"]}', ["img_home"]), ["img_home"]);
+assert.throws(() => parseImageSelection('{"imageIds":["img_home","img_home"]}', ["img_home"]), /repeat/);
+assert.equal(firstRelumeSlug({ structuredContent: { components: [{ slug: "section_header123" }] } }), "section_header123");
+assert.equal(firstRelumeSlug({ content: [{ text: "Best match: footer12_component" }] }), "footer12_component");
 const theme = parseTheme(JSON.stringify({
   backgroundPrimary: "#ffffff", backgroundSecondary: "#f5f5f5", backgroundTertiary: "#336600", backgroundAlternative: "#111111",
   textPrimary: "#111111", textSecondary: "#666666", textAlternative: "#ffffff", borderPrimary: "#111111", borderSecondary: "#cccccc",
@@ -114,6 +118,16 @@ assert.equal(relumeComponentApi("components/relume/Header1.tsx", [
   "```",
   "",
 ].join("\n"));
+assert.match(relumeApiForSlug([
+  "## components/relume/Header1.tsx",
+  "hero api",
+  "## components/relume/Footer2.tsx",
+  "footer api",
+].join("\n"), "section_header1"), /hero api/);
+assert.match(relumeApiForSlug([
+  "## components/relume/Navbar5.tsx",
+  "navbar api",
+].join("\n"), "navbar5_component"), /navbar api/);
 
 const parsed = parseArgs(["https://acme.test", "--slug", "Acme Plumbing"]);
 assert.deepEqual(parsed.positional, ["https://acme.test"]);

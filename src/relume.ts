@@ -37,7 +37,7 @@ async function accessToken(authPath: string) {
   return token;
 }
 
-export async function getRelumeComponents(slugs: string[], authPath = RELUME_AUTH) {
+async function callRelumeTool(name: string, args: Record<string, unknown>, authPath = RELUME_AUTH) {
   const token = await accessToken(authPath);
   let sessionId: string | null = null;
   let requestId = 0;
@@ -69,13 +69,8 @@ export async function getRelumeComponents(slugs: string[], authPath = RELUME_AUT
     });
     await send("notifications/initialized", undefined, true);
     return await send("tools/call", {
-      name: "get_components",
-      arguments: {
-        slugs,
-        primitives: "include",
-        aliases: { ui: "@/components/ui", hooks: "@/hooks", lib: "@/lib" },
-        have: ["button", "cn", "use-media-query"],
-      },
+      name,
+      arguments: args,
     });
   } finally {
     if (sessionId) {
@@ -85,6 +80,41 @@ export async function getRelumeComponents(slugs: string[], authPath = RELUME_AUT
       }).catch(() => {});
     }
   }
+}
+
+export function firstRelumeSlug(result: unknown) {
+  const candidates: string[] = [];
+  const visit = (value: unknown, key?: string) => {
+    if (typeof value === "string") {
+      if (key?.toLowerCase() === "slug") candidates.push(value);
+      for (const match of value.matchAll(/\b(?:section_[a-z0-9_]+|(?:navbar|footer)\d+_component)\b/gi)) candidates.push(match[0]);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (value && typeof value === "object") {
+      for (const [childKey, child] of Object.entries(value)) visit(child, childKey);
+    }
+  };
+  visit(result);
+  const slug = candidates.find((candidate) => /^(?:section_[a-z0-9_]+|(?:navbar|footer)\d+_component)$/i.test(candidate));
+  if (!slug) throw new Error("Relume search returned no component slug");
+  return slug.toLowerCase();
+}
+
+export async function searchRelumeComponent(query: string, authPath = RELUME_AUTH) {
+  return callRelumeTool("search_components", { query, category: "", limit: 1 }, authPath);
+}
+
+export async function getRelumeComponents(slugs: string[], authPath = RELUME_AUTH) {
+  return callRelumeTool("get_components", {
+    slugs,
+    primitives: "include",
+    aliases: { ui: "@/components/ui", hooks: "@/hooks", lib: "@/lib" },
+    have: ["button", "cn", "use-media-query"],
+  }, authPath);
 }
 
 function sha256(content: string) {
@@ -142,6 +172,17 @@ export function relumeComponentApi(path: string, content: string) {
   if (component === -1) throw new Error(`Relume component export not found in ${path}`);
   const signatureEnd = content.indexOf("\n", component);
   return `## ${path}\n\n\`\`\`tsx\n${content.slice(0, signatureEnd === -1 ? content.length : signatureEnd).trim()}\n\`\`\`\n`;
+}
+
+export function relumeApiForSlug(api: string, slug: string) {
+  const componentName = slug.replace(/^section_/, "").replace(/_component$/, "").replace(/[^a-z0-9]/gi, "").toLowerCase();
+  const blocks = api.split(/(?=^## )/m);
+  const block = blocks.find((candidate) => {
+    const path = candidate.match(/^## (.+)$/m)?.[1];
+    return path?.split("/").at(-1)?.replace(/\.tsx$/, "").replace(/[^a-z0-9]/gi, "").toLowerCase() === componentName;
+  });
+  if (!block) throw new Error(`Relume prop API not found for ${slug}`);
+  return block.trim();
 }
 
 export async function installRelumeComponents(workdir: string, slugs: string[], authPath = RELUME_AUTH) {
