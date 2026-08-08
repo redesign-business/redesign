@@ -83,11 +83,14 @@ async function callRelumeTool(name: string, args: Record<string, unknown>, authP
 }
 
 export function firstRelumeSlug(result: unknown) {
-  const candidates: string[] = [];
+  const structured: string[] = [];
+  const textCandidates: string[] = [];
   const visit = (value: unknown, key?: string) => {
     if (typeof value === "string") {
-      if (key?.toLowerCase() === "slug") candidates.push(value);
-      for (const match of value.matchAll(/\b(?:section_[a-z0-9_]+|(?:navbar|footer)\d+_component)\b/gi)) candidates.push(match[0]);
+      if (key?.toLowerCase() === "slug") structured.push(value);
+      const labeled = value.match(/\bslug\b["':\s]+([a-z0-9_-]+)/i)?.[1];
+      if (labeled) textCandidates.push(labeled);
+      for (const match of value.matchAll(/\b(?:section_[a-z0-9_]+|(?:navbar|footer)\d+_component)\b/gi)) textCandidates.push(match[0]);
       return;
     }
     if (Array.isArray(value)) {
@@ -99,7 +102,7 @@ export function firstRelumeSlug(result: unknown) {
     }
   };
   visit(result);
-  const slug = candidates.find((candidate) => /^(?:section_[a-z0-9_]+|(?:navbar|footer)\d+_component)$/i.test(candidate));
+  const slug = [...structured, ...textCandidates].find((candidate) => /^[a-z0-9][a-z0-9_-]*$/i.test(candidate));
   if (!slug) throw new Error("Relume search returned no component slug");
   return slug.toLowerCase();
 }
