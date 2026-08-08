@@ -52,7 +52,7 @@ After every OpenCode invocation, the runner replaces the run's cumulative model-
 
    Output: deterministically installed section, element, primitive, hook, and utility files plus their original sources and immutable hashes
 
-   Code may add only mechanical TypeScript compatibility annotations required by the pinned template dependencies and a standard size constraint to bare logo images. The original source and each exact compatibility difference remain committed for comparison.
+   Code installs the exact Relume sections and required primitives, preserving only the template's intentionally customized Button, utility, and media-query hook. It may add mechanical TypeScript compatibility annotations and a standard size constraint to bare logo images. Every original source and exact compatibility difference remains committed for comparison.
 
 5. **(GPT-5.6 Sol, same session) Populate and theme the page**
 

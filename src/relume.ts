@@ -74,7 +74,7 @@ export async function getRelumeComponents(slugs: string[], authPath = RELUME_AUT
         slugs,
         primitives: "include",
         aliases: { ui: "@/components/ui", hooks: "@/hooks", lib: "@/lib" },
-        have: ["button", "card", "badge", "cn", "use-media-query"],
+        have: ["button", "cn", "use-media-query"],
       },
     });
   } finally {
@@ -149,7 +149,8 @@ export async function installRelumeComponents(workdir: string, slugs: string[], 
   for (const file of parsed.files) {
     const path = `${workdir}/${file.path}`;
     const isSection = file.path.startsWith("components/relume/");
-    if (!isSection) {
+    const preserveExisting = file.path === "components/ui/button.tsx" || file.path === "lib/utils.ts" || file.path === "hooks/use-media-query.ts";
+    if (preserveExisting) {
       try {
         await readFile(path);
         continue;
@@ -158,10 +159,10 @@ export async function installRelumeComponents(workdir: string, slugs: string[], 
     const compatible = applyRelumeCompatibility(file.content);
     if (isSection) {
       api.push(relumeComponentApi(file.path, file.content));
-      const originalPath = `${workdir}/.redesign/relume-original/${file.path}`;
-      await mkdir(dirname(originalPath), { recursive: true });
-      await writeFile(originalPath, file.content);
     }
+    const originalPath = `${workdir}/.redesign/relume-original/${file.path}`;
+    await mkdir(dirname(originalPath), { recursive: true });
+    await writeFile(originalPath, file.content);
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, compatible.content);
     installed.push({
@@ -171,6 +172,8 @@ export async function installRelumeComponents(workdir: string, slugs: string[], 
       compatibilityEdits: compatible.edits,
     });
   }
+
+  api.unshift(relumeComponentApi("components/ui/button.tsx", await readFile(`${workdir}/components/ui/button.tsx`, "utf8")));
 
   const manifest = { slugs, files: installed, dependencies: parsed.dependencies } satisfies RelumeInstall;
   await writeFile(`${workdir}/.redesign/relume-api.md`, `${api.join("\n").trim()}\n`);
