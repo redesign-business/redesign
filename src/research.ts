@@ -42,8 +42,8 @@ export function invalidPageLinks(page: string, validTargets: string[]) {
 
 export function extractOutreachProof(markdown: string) {
   const section = markdown.match(/(?:^|\n)## Outreach\s*\n([\s\S]*?)(?=\n## |\s*$)/)?.[1] ?? "";
-  const proof = section.match(/^[-*]\s+(.+)$/gm)?.map((line) => {
-    const sentence = line.replace(/^[-*]\s+/, "").trim();
+  const proof = section.match(/^(?:[-*]|\d+\.)\s+(.+)$/gm)?.map((line) => {
+    const sentence = line.replace(/^(?:[-*]|\d+\.)\s+/, "").trim();
     return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
   }) ?? [];
   if (proof.length !== 3) {

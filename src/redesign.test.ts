@@ -206,6 +206,11 @@ assert.deepEqual(extractOutreachProof("## Outreach\n- Built 500 homes\n- Rated 4
   "Rated 4.9 stars.",
   "Serving Tahoe since 1982.",
 ]);
+assert.deepEqual(extractOutreachProof("## Outreach\n1. Built 500 homes.\n2. Rated 4.9 stars.\n3. Serving Tahoe since 1982."), [
+  "Built 500 homes.",
+  "Rated 4.9 stars.",
+  "Serving Tahoe since 1982.",
+]);
 assert.throws(() => extractOutreachProof("## Outreach\n- Only one."), /exactly three/);
 assert.equal(
   extractContactInfo('<form><input name="student"><input type="email"><button>Register</button></form>', "https://acme.test/classes").contactFormUrl,
