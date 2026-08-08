@@ -116,12 +116,13 @@ function buildSelectionPrompt(hasImageContactSheets: boolean) {
   return [
     "Read .redesign/selection-input.md. For each planned section, search Relume with a natural-language description and choose the best-fitting unmodified component.",
     "Do not guess category slugs. Call list_categories only if natural-language search fails or a tool requires it. Do not call get_components.",
+    "Compare at least three relevant search results for each section before choosing. Never choose from a one-result search.",
     hasImageContactSheets
-      ? "Inspect every attached image contact sheet. Assign only the strongest relevant image IDs to each section, use every image at most once, and do not default to early IDs."
+      ? "The contact sheets are already attached as images: inspect them directly and do not call Read on their PNG paths. Assign only the strongest relevant image IDs to content-image sections, use every image at most once, and do not default to early IDs. Leave navbar, footer, and logo-section imageIds empty; the original logo is supplied separately."
       : "No usable images are available; use empty imageIds arrays.",
     "Write .redesign/section-selection.json with exactly the same section IDs and order as the input:",
     '{"sections":[{"id":"hero","slug":"section_header1","imageIds":["img_001"]}]}',
-    "The output is only a selection. Do not write copy or code, retrieve source, install, build, or edit the website.",
+    "Create the file immediately with the Write tool; do not try to update a file that does not exist. The output is only a selection. Do not write copy or code, retrieve source, install, build, or edit the website.",
     "You are done when .redesign/section-selection.json exists.",
   ].join("\n");
 }
@@ -132,8 +133,9 @@ function buildThemePrompt(hasHomepageScreenshot: boolean) {
     hasHomepageScreenshot ? "Use the original screenshot as the main brand reference." : "The original screenshot was unavailable; use the image contact sheets.",
     "If the logo has a saturated color, use it as backgroundTertiary. All other UI colors must form one neutral palette. buttonText must have strong contrast against backgroundTertiary.",
     "Use only installed/system font stacks. Keep radius and shadow restrained.",
-    "Output only this JSON shape with six-digit hex colors and no markdown:",
-    '{"backgroundPrimary":"#ffffff","backgroundSecondary":"#f5f5f5","backgroundTertiary":"#336600","backgroundAlternative":"#111111","textPrimary":"#111111","textSecondary":"#666666","textAlternative":"#ffffff","borderPrimary":"#111111","borderSecondary":"#cccccc","borderAlternative":"#ffffff","buttonText":"#ffffff","fontSans":"Arial, sans-serif","fontDisplay":"Georgia, serif","radius":"0rem","shadow":"none"}',
+    "The screenshot and contact sheets are already attached as images: inspect them directly and do not call Read on their paths.",
+    "Output one JSON object with exactly these keys: backgroundPrimary, backgroundSecondary, backgroundTertiary, backgroundAlternative, textPrimary, textSecondary, textAlternative, borderPrimary, borderSecondary, borderAlternative, buttonText, fontSans, fontDisplay, radius, shadow.",
+    "All eleven color values must be six-digit hex colors derived from the supplied brand. Do not copy generic example values.",
     "Do not edit CSS or any website file. You are done when .redesign/theme.json exists.",
   ].join("\n");
 }
