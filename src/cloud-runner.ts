@@ -4,6 +4,7 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { replaceRunSessions, updateBusinessContactInfo, updateRunData } from "./db.js";
 import { phaseComplete, redactSessionOutput } from "./phase.js";
+import { applyTheme, parsePagePlan, parseSectionSelection, parseTheme, renderLayout, type PagePlan, type SectionSelection } from "./pipeline.js";
 import { installRelumeComponents, verifyRelumeComponents, type RelumeInstall } from "./relume.js";
 import { collectResearch as collectResearchData, extractOutreachProof, invalidPageLinks, relumeButtonLabelsUseChildren } from "./research.js";
 
@@ -33,12 +34,18 @@ type Pricing = {
 const WORKDIR = "/vercel/sandbox";
 const OPENCODE_BIN = "/home/vercel-sandbox/.opencode/node_modules/.bin/opencode";
 const TEMPLATE_REPO = "https://github.com/redesign-business/template.git";
+const TEMPLATE_REF = "codex/cheap-pipeline";
 const RESEARCH_MODEL = "deepseek/deepseek-v4-flash-0731";
-const BUILD_MODEL = "openai/gpt-5.6-sol";
+const PLAN_MODEL = "deepseek/deepseek-v4-flash-0731";
+const SELECT_MODEL = "openai/gpt-5-nano";
+const PAGE_MODEL = "deepseek/deepseek-v4-flash-0731";
+const THEME_MODEL = "openai/gpt-5-nano";
 const REPAIR_MODEL = "deepseek/deepseek-v4-flash-0731";
 const RESEARCH_AGENT = "research";
-const COMPOSE_AGENT = "compose";
-const BUILD_AGENT = "build";
+const PLAN_AGENT = "plan";
+const SELECT_AGENT = "select";
+const PAGE_AGENT = "page";
+const THEME_AGENT = "theme";
 const REPAIR_AGENT = "repair";
 const HOMEPAGE_SCREENSHOT = "/tmp/original-homepage.png";
 const MAX_PHASE_CONTINUES = Number(process.env.REDESIGN_MAX_PHASE_CONTINUES ?? 5);
@@ -92,63 +99,53 @@ function buildResearchPrompt() {
   ].join("\n");
 }
 
-function buildCompositionPrompt(hasImageContactSheets: boolean, hasHomepageScreenshot: boolean) {
+function buildPagePlanPrompt() {
   return [
-    "Choose the Relume composition for one finished homepage from the supplied evidence.",
-    "",
-    `Original URL: ${originalUrl}`,
-    "",
-    "Inputs:",
-    "- proof.md is the complete factual and copy source.",
-    "- .redesign/build-images.json is the complete allowed image set. Use its local `src` values.",
-    hasImageContactSheets
-      ? "- The attached contact sheets show those allowed images and their IDs."
-      : "- No usable original images were available.",
-    "- The authenticated Relume MCP provides the section library and its exact React source.",
-    hasHomepageScreenshot
-      ? "- The attached original screenshot is a brand reference, not a layout to copy."
-      : "- The original screenshot was unavailable.",
-    "",
-    "Selection contract:",
-    "- Search Relume with natural-language descriptions of each content role and composition. Do not guess category slugs. Call list_categories only if natural-language search fails or a tool requires a category.",
-    "- Batch compatible searches when possible. Choose the complete section set from search results before retrieving source.",
-    "- Choose as many purposeful components as needed to present every distinct, useful proof point in proof.md, including navigation and footer. Give each section a clear job, combine closely related proof rather than repeating or padding, and choose layouts that fit the available proof and images without structural changes.",
-    "- Inspect every original-image contact sheet before choosing. Later sheets are equally important; never default to the earliest IDs.",
-    "- Do not call get_components and do not edit the website.",
-    "- Write .redesign/relume-selection.json as exactly one JSON object with one key: `slugs`, containing the selected Relume slugs in page order.",
-    "",
-    "Do not create plans or notes, browse the web, retrieve source, install, build, commit, push, or deploy.",
-    "You are done when .redesign/relume-selection.json exists.",
+    "Read .redesign/planning-input.md and create .redesign/page-plan.json.",
+    "Decide the fewest purposeful landing-page sections that present every distinct useful proof point. Include a navbar first and footer last. Combine related proof; do not pad or invent claims.",
+    "Use one CTA wording and one verified destination throughout. Set cta to null only when no verified destination exists.",
+    "Output only this JSON shape, with no markdown:",
+    '{"metadata":{"title":"...","description":"..."},"cta":{"title":"...","url":"..."},"sections":[{"id":"hero","purpose":"What this section must communicate","proof":["Exact facts this section must present"]}]}',
+    "Every id must be unique kebab-case. proof may be empty only for navigation or footer. Do not choose Relume components, images, styling, or write code.",
+    "You are done when .redesign/page-plan.json exists.",
   ].join("\n");
 }
 
-function buildImplementationPrompt() {
+function buildSelectionPrompt(hasImageContactSheets: boolean) {
   return [
-    "Now build the finished homepage using the exact Relume components installed by code.",
-    "",
-    "The selected component paths and immutable hashes are listed in .redesign/relume-install.json. Their compact prop API is in .redesign/relume-api.md.",
-    ".redesign/valid-links.json is the complete set of verified destinations from the original site. Hash links are also allowed when their matching section ID exists in app/page.tsx.",
-    "Use that API to compose them in app/page.tsx. Do not read, edit, copy, consolidate, or reimplement any installed component, primitive, hook, or utility.",
-    "",
-    "Implementation contract:",
-    "- Edit only app/page.tsx, app/globals.css, and app/layout.tsx.",
-    "- app/page.tsx supplies section order, typed props, concise grounded copy, original image paths, the original logo, links, and business metadata.",
-    "- app/globals.css may set the existing theme variables and basic element defaults. Do not add named CSS classes; use Tailwind utilities in page.tsx when a page-level wrapper genuinely needs styling.",
-    "- Follow the existing Relume semantic color roles exactly: background-primary is the main surface; background-secondary is the alternate surface; background-tertiary is the primary CTA/brand fill; background-alternative is the darkest surface; use the matching text, border, link, and scheme roles.",
-    "- If the original logo has a clear saturated color, assign it to the existing background-tertiary theme variable and give scheme-button-text an accessible neutral contrast color. Otherwise choose one restrained background-tertiary color. Use one neutral palette for every other role.",
-    "- Do not add parallel primary, accent, brand, or foreground tokens, and do not add raw colors outside the existing Relume theme variables.",
-    "- Use the shared Button default variant for every primary CTA. Use one CTA label consistently and do not add CTA-specific styling.",
-    "- Relume sections render `ButtonProps.title` as the visible label. Set `title` on every button object; never use `children` for button data.",
-    "- Every link or button must use a destination from .redesign/valid-links.json or a real section ID in this page. Use an absolute original-site URL for an original subpage; never invent a local route. Omit the control if no verified destination fits.",
-    "- Omit optional decorative props by default. Add a badge, tag, icon, secondary button, or social link only when it communicates unique useful information or performs a verified action.",
-    "- Preserve a strong original color or font when present and always use the original logo.",
-    "- Present every distinct, useful proof point from proof.md. Combine related proof where it reads naturally, adapt copy length to the installed component props, and do not invent claims.",
-    "- Choose original images for visual fit. Use each once, avoid near-duplicates, and use the strongest distinct work for portfolio sections.",
-    "- Do not use remote placeholders, stock, generated, repeated, or upscaled media.",
-    "- Keep the selected layouts and interactions intact. If a component is imperfect, populate it faithfully rather than redesigning it.",
-    "",
-    "Make one implementation patch, then stop without rereading or auditing the result. Do not use Relume tools, create plans or notes, browse, install dependencies, build, commit, push, or deploy.",
-    "You are done when app/page.tsx, app/globals.css, and app/layout.tsx form the finished site.",
+    "Read .redesign/selection-input.md. For each planned section, search Relume with a natural-language description and choose the best-fitting unmodified component.",
+    "Do not guess category slugs. Call list_categories only if natural-language search fails or a tool requires it. Do not call get_components.",
+    hasImageContactSheets
+      ? "Inspect every attached image contact sheet. Assign only the strongest relevant image IDs to each section, use every image at most once, and do not default to early IDs."
+      : "No usable images are available; use empty imageIds arrays.",
+    "Write .redesign/section-selection.json with exactly the same section IDs and order as the input:",
+    '{"sections":[{"id":"hero","slug":"section_header1","imageIds":["img_001"]}]}',
+    "The output is only a selection. Do not write copy or code, retrieve source, install, build, or edit the website.",
+    "You are done when .redesign/section-selection.json exists.",
+  ].join("\n");
+}
+
+function buildThemePrompt(hasHomepageScreenshot: boolean) {
+  return [
+    "Create .redesign/theme.json from the attached original-site visuals.",
+    hasHomepageScreenshot ? "Use the original screenshot as the main brand reference." : "The original screenshot was unavailable; use the image contact sheets.",
+    "If the logo has a saturated color, use it as backgroundTertiary. All other UI colors must form one neutral palette. buttonText must have strong contrast against backgroundTertiary.",
+    "Use only installed/system font stacks. Keep radius and shadow restrained.",
+    "Output only this JSON shape with six-digit hex colors and no markdown:",
+    '{"backgroundPrimary":"#ffffff","backgroundSecondary":"#f5f5f5","backgroundTertiary":"#336600","backgroundAlternative":"#111111","textPrimary":"#111111","textSecondary":"#666666","textAlternative":"#ffffff","borderPrimary":"#111111","borderSecondary":"#cccccc","borderAlternative":"#ffffff","buttonText":"#ffffff","fontSans":"Arial, sans-serif","fontDisplay":"Georgia, serif","radius":"0rem","shadow":"none"}',
+    "Do not edit CSS or any website file. You are done when .redesign/theme.json exists.",
+  ].join("\n");
+}
+
+function buildPagePrompt() {
+  return [
+    "Read .redesign/page-input.md and create app/page.tsx. That one input contains the complete plan, selected Relume prop APIs, image assignments, original logo, CTA, and verified links.",
+    "Import and render every selected Relume section in the specified order. Supply its typed props with concise grounded copy and the assigned local images. Do not invent claims or layouts.",
+    "Use the original logo. Use the same CTA title and destination everywhere through the shared Button props. Set ButtonProps.title; never use children for button data.",
+    "Only use verified destinations or matching section hashes. Omit optional badges, tags, icons, secondary buttons, social links, and other decorative props unless they convey unique useful proof or a verified action.",
+    "Use each assigned image at most once. Do not use placeholders, stock, generated, remote, repeated, or upscaled media.",
+    "Edit only app/page.tsx. Do not read or edit installed components, globals.css, layout.tsx, or any other file. Do not use Relume, build, commit, push, or deploy.",
+    "You are done when app/page.tsx is the complete page.",
   ].join("\n");
 }
 
@@ -241,7 +238,7 @@ async function setupGit() {
 async function seedTemplate() {
   await sh([
     "tmp=$(mktemp -d)",
-    `git clone --depth 1 ${TEMPLATE_REPO} "$tmp"`,
+    `git clone --depth 1 --branch ${TEMPLATE_REF} ${TEMPLATE_REPO} "$tmp"`,
     "shopt -s dotglob",
     "for item in \"$tmp\"/*; do",
     "  [ \"$(basename \"$item\")\" = .git ] && continue",
@@ -301,16 +298,78 @@ async function createBuildAssetPack() {
     .map((name) => `${WORKDIR}/.redesign/${name}`);
 }
 
-async function readRelumeSelection() {
-  const selection = JSON.parse(await readFile(`${WORKDIR}/.redesign/relume-selection.json`, "utf8")) as { slugs?: unknown };
-  if (!Array.isArray(selection.slugs) || selection.slugs.length === 0) {
-    throw new Error("Relume selection must contain at least one slug");
-  }
-  const slugs = selection.slugs.map(String);
-  if (new Set(slugs).size !== slugs.length || slugs.some((slug) => !/^[a-z0-9_]+$/.test(slug))) {
-    throw new Error("Relume selection contains invalid or duplicate slugs");
-  }
-  return slugs;
+async function validLinks() {
+  return (JSON.parse(await readFile(`${WORKDIR}/.redesign/valid-links.json`, "utf8")) as { targets: string[] }).targets;
+}
+
+async function buildImages() {
+  return (JSON.parse(await readFile(`${WORKDIR}/.redesign/build-images.json`, "utf8")) as { images: Array<Record<string, unknown> & { id: string }> }).images;
+}
+
+async function readPagePlan() {
+  return parsePagePlan(await readFile(`${WORKDIR}/.redesign/page-plan.json`, "utf8"), await validLinks());
+}
+
+async function readSectionSelection(plan: PagePlan) {
+  const images = (await buildImages()).filter((image) => image.role !== "logo");
+  return parseSectionSelection(await readFile(`${WORKDIR}/.redesign/section-selection.json`, "utf8"), plan, images.map((image) => image.id));
+}
+
+async function createPlanningInput() {
+  await write(`${WORKDIR}/.redesign/planning-input.md`, [
+    "# Business proof",
+    await readFile(`${WORKDIR}/proof.md`, "utf8"),
+    "# Verified link destinations",
+    "```json",
+    JSON.stringify(await validLinks(), null, 2),
+    "```",
+  ].join("\n\n"));
+}
+
+async function createSelectionInput(plan: PagePlan) {
+  await write(`${WORKDIR}/.redesign/selection-input.md`, [
+    "# Page plan",
+    "```json",
+    JSON.stringify(plan, null, 2),
+    "```",
+    "# Available original images",
+    "```json",
+    JSON.stringify((await buildImages()).filter((image) => image.role !== "logo"), null, 2),
+    "```",
+  ].join("\n\n"));
+}
+
+async function createPageInput(plan: PagePlan, selection: SectionSelection) {
+  const images = await buildImages();
+  const selectedIds = new Set(selection.sections.flatMap((section) => section.imageIds));
+  const suppliedImages = images.filter((image) => selectedIds.has(image.id) || image.role === "logo");
+  await write(`${WORKDIR}/.redesign/page-input.md`, [
+    "# Page plan",
+    "```json",
+    JSON.stringify(plan, null, 2),
+    "```",
+    "# Selected components and images",
+    "```json",
+    JSON.stringify(selection, null, 2),
+    "```",
+    "# Image records",
+    "```json",
+    JSON.stringify(suppliedImages, null, 2),
+    "```",
+    "# Verified link destinations",
+    "```json",
+    JSON.stringify(await validLinks(), null, 2),
+    "```",
+    "# Exact Relume prop APIs",
+    await readFile(`${WORKDIR}/.redesign/relume-api.md`, "utf8"),
+  ].join("\n\n"));
+}
+
+async function applyGeneratedThemeAndMetadata(plan: PagePlan) {
+  const theme = parseTheme(await readFile(`${WORKDIR}/.redesign/theme.json`, "utf8"));
+  const css = await readFile(`${WORKDIR}/app/globals.css`, "utf8");
+  await write(`${WORKDIR}/app/globals.css`, applyTheme(css, theme));
+  await write(`${WORKDIR}/app/layout.tsx`, renderLayout(plan.metadata));
 }
 
 function dependencyName(spec: string) {
@@ -395,14 +454,10 @@ async function runOpenCodePhase(
   throw new Error(`${phase} did not deliver after ${maxContinues} continue attempts\n${outputTail(output)}`);
 }
 
-async function implementationDelivered(globalsBefore: string) {
+async function pageDelivered() {
   try {
     const page = await readFile(`${WORKDIR}/app/page.tsx`, "utf8");
-    const globals = await readFile(`${WORKDIR}/app/globals.css`, "utf8");
-    const layout = await readFile(`${WORKDIR}/app/layout.tsx`, "utf8");
-    return page.length > 1_000
-      && globals !== globalsBefore
-      && !/Create Next App|Generated by create next app/.test(layout);
+    return page.length > 1_000 && !/Get started by editing|Create Next App/.test(page);
   } catch {
     return false;
   }
@@ -627,7 +682,10 @@ async function main() {
     startedAt,
     status: "setup",
     researchModel: RESEARCH_MODEL,
-    buildModel: BUILD_MODEL,
+    planModel: PLAN_MODEL,
+    selectionModel: SELECT_MODEL,
+    pageModel: PAGE_MODEL,
+    themeModel: THEME_MODEL,
     repairModel: REPAIR_MODEL,
   });
 
@@ -659,42 +717,78 @@ async function main() {
   await commitAll("chore: add proof");
 
   const proofSentences = extractOutreachProof(await readFile(`${WORKDIR}/proof.md`, "utf8"));
-  await write("/tmp/composition-prompt.md", buildCompositionPrompt(imageContactSheets.length > 0, hasHomepageScreenshot));
-  const compositionArgs = ["run", "Follow the attached composition prompt.", "--auto", "--dir", WORKDIR, "--title", `Compose ${slug}`, "--agent", COMPOSE_AGENT, "--file", "/tmp/composition-prompt.md"];
-  for (const sheet of imageContactSheets) compositionArgs.push("--file", sheet);
-  if (hasHomepageScreenshot) compositionArgs.push("--file", HOMEPAGE_SCREENSHOT);
-  await updateRun({ status: "composition", researchAttempts: research.attempts, proofSentences });
-  const composition = await runOpenCodePhase("composition", BUILD_MODEL, compositionArgs, {
-    agent: COMPOSE_AGENT,
+  await createPlanningInput();
+  await write("/tmp/page-plan-prompt.md", buildPagePlanPrompt());
+  await updateRun({ status: "planning", researchAttempts: research.attempts, proofSentences });
+  const planning = await runOpenCodePhase("planning", PLAN_MODEL, ["run", "Follow the attached page-planning prompt.", "--auto", "--dir", WORKDIR, "--title", `Plan ${slug}`, "--agent", PLAN_AGENT, "--file", "/tmp/page-plan-prompt.md"], {
+    agent: PLAN_AGENT,
     deliverableDelivered: async () => {
       try {
-        await readRelumeSelection();
+        await readPagePlan();
         return true;
       } catch {
         return false;
       }
     },
-    maxContinues: 0,
+    retryMessage: "Finish .redesign/page-plan.json in the exact required JSON shape.",
   });
 
-  const relumeSlugs = await readRelumeSelection();
+  const plan = await readPagePlan();
+  await createSelectionInput(plan);
+  await write("/tmp/section-selection-prompt.md", buildSelectionPrompt(imageContactSheets.length > 0));
+  const selectionArgs = ["run", "Follow the attached section-selection prompt.", "--auto", "--dir", WORKDIR, "--title", `Select ${slug}`, "--agent", SELECT_AGENT, "--file", "/tmp/section-selection-prompt.md"];
+  for (const sheet of imageContactSheets) selectionArgs.push("--file", sheet);
+  await updateRun({ status: "selection", planningAttempts: planning.attempts });
+  const selecting = await runOpenCodePhase("selection", SELECT_MODEL, selectionArgs, {
+    agent: SELECT_AGENT,
+    deliverableDelivered: async () => {
+      try {
+        await readSectionSelection(plan);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    retryMessage: "Finish .redesign/section-selection.json with every planned section in order and valid unique image IDs.",
+  });
+
+  const selection = await readSectionSelection(plan);
+  const relumeSlugs = [...new Set(selection.sections.map((section) => section.slug))];
   await run(OPENCODE_BIN, ["mcp", "list"], { cwd: WORKDIR });
   const relumeInstall: RelumeInstall = await installRelumeComponents(WORKDIR, relumeSlugs);
   await installMissingDependencies(relumeInstall.dependencies);
   await commitAll("chore: install selected relume components");
 
-  await write("/tmp/implementation-prompt.md", buildImplementationPrompt());
-  const globalsBeforeImplementation = await readFile(`${WORKDIR}/app/globals.css`, "utf8");
-  const implementationArgs = ["run", "Continue with the attached implementation prompt.", "--continue", "--auto", "--dir", WORKDIR, "--agent", BUILD_AGENT, "--file", "/tmp/implementation-prompt.md"];
-  await updateRun({ status: "implementation", compositionAttempts: composition.attempts, relumeComponents: relumeSlugs });
-  const implementation = await runOpenCodePhase("implementation", BUILD_MODEL, implementationArgs, {
-    agent: BUILD_AGENT,
-    deliverableDelivered: () => implementationDelivered(globalsBeforeImplementation),
-    maxContinues: 0,
+  await createPageInput(plan, selection);
+  await write("/tmp/page-prompt.md", buildPagePrompt());
+  await updateRun({ status: "page", selectionAttempts: selecting.attempts, relumeComponents: relumeSlugs });
+  const page = await runOpenCodePhase("page", PAGE_MODEL, ["run", "Follow the attached page prompt.", "--auto", "--dir", WORKDIR, "--title", `Build page ${slug}`, "--agent", PAGE_AGENT, "--file", "/tmp/page-prompt.md"], {
+    agent: PAGE_AGENT,
+    deliverableDelivered: pageDelivered,
+    retryMessage: "Finish app/page.tsx from .redesign/page-input.md.",
   });
+
+  await write("/tmp/theme-prompt.md", buildThemePrompt(hasHomepageScreenshot));
+  const themeArgs = ["run", "Follow the attached theme prompt.", "--auto", "--dir", WORKDIR, "--title", `Theme ${slug}`, "--agent", THEME_AGENT, "--file", "/tmp/theme-prompt.md"];
+  for (const sheet of imageContactSheets) themeArgs.push("--file", sheet);
+  if (hasHomepageScreenshot) themeArgs.push("--file", HOMEPAGE_SCREENSHOT);
+  await updateRun({ status: "theme", pageAttempts: page.attempts });
+  const theme = await runOpenCodePhase("theme", THEME_MODEL, themeArgs, {
+    agent: THEME_AGENT,
+    deliverableDelivered: async () => {
+      try {
+        parseTheme(await readFile(`${WORKDIR}/.redesign/theme.json`, "utf8"));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    retryMessage: "Finish .redesign/theme.json in the exact required JSON shape.",
+  });
+  await applyGeneratedThemeAndMetadata(plan);
   await verifyRelumeComponents(WORKDIR, relumeInstall);
 
-  await updateRun({ status: "build", implementationAttempts: implementation.attempts });
+  await updateRun({ status: "build", themeAttempts: theme.attempts });
   const build = await buildWithRepairs();
   await verifyRelumeComponents(WORKDIR, relumeInstall);
   await validateGlobalStyles();

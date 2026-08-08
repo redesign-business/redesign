@@ -494,6 +494,10 @@ async function uploadRunner(sandbox: Sandbox) {
       content: Buffer.from(await readFile(join(process.cwd(), "src", "phase.ts"), "utf8")),
     },
     {
+      path: "/tmp/redesign-runner/src/pipeline.ts",
+      content: Buffer.from(await readFile(join(process.cwd(), "src", "pipeline.ts"), "utf8")),
+    },
+    {
       path: "/tmp/redesign-runner/src/research.ts",
       content: Buffer.from(await readFile(join(process.cwd(), "src", "research.ts"), "utf8")),
     },

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { businessSummaryFromRow } from "./db.js";
 import { phaseComplete, redactSessionOutput } from "./phase.js";
+import { applyTheme, parsePagePlan, parseSectionSelection, parseTheme, renderLayout } from "./pipeline.js";
 import { applyRelumeCompatibility, parseRelumeComponents, relumeComponentApi } from "./relume.js";
 import {
   githubRepoFromUrl,
@@ -21,6 +22,31 @@ assert.equal(phaseComplete(0), true);
 assert.equal(phaseComplete(0, false), false);
 assert.equal(phaseComplete(1, true), true);
 assert.equal(redactSessionOutput("used secret-token and ok", ["secret-token", "short"]), "used [REDACTED] and ok");
+const pagePlan = parsePagePlan(JSON.stringify({
+  metadata: { title: "Acme", description: "Trusted builders" },
+  cta: { title: "Contact us", url: "https://acme.test/contact" },
+  sections: [
+    { id: "nav", purpose: "Navigation", proof: [] },
+    { id: "hero", purpose: "Lead with experience", proof: ["Built 500 homes."] },
+    { id: "footer", purpose: "Footer", proof: [] },
+  ],
+}), ["https://acme.test/contact"]);
+assert.deepEqual(parseSectionSelection(JSON.stringify({ sections: [
+  { id: "nav", slug: "navbar_1", imageIds: ["img_logo"] },
+  { id: "hero", slug: "header_1", imageIds: ["img_home"] },
+  { id: "footer", slug: "footer_1", imageIds: [] },
+] }), pagePlan, ["img_logo", "img_home"]), { sections: [
+  { id: "nav", slug: "navbar_1", imageIds: ["img_logo"] },
+  { id: "hero", slug: "header_1", imageIds: ["img_home"] },
+  { id: "footer", slug: "footer_1", imageIds: [] },
+] });
+const theme = parseTheme(JSON.stringify({
+  backgroundPrimary: "#ffffff", backgroundSecondary: "#f5f5f5", backgroundTertiary: "#336600", backgroundAlternative: "#111111",
+  textPrimary: "#111111", textSecondary: "#666666", textAlternative: "#ffffff", borderPrimary: "#111111", borderSecondary: "#cccccc",
+  borderAlternative: "#ffffff", buttonText: "#ffffff", fontSans: "Arial, sans-serif", fontDisplay: "Georgia, serif", radius: "0rem", shadow: "none",
+}));
+assert.match(applyTheme(":root { --color-background-primary: #000000; --color-background-secondary: #000000; --color-background-tertiary: #000000; --color-background-alternative: #000000; --color-text-primary: #000000; --color-text-secondary: #000000; --color-text-alternative: #000000; --color-border-primary: #000000; --color-border-secondary: #000000; --color-border-alternative: #000000; --scheme-button-text: #000000; --font-sans: Arial; --font-display: Arial; --radius-button: 0rem; --radius-card: 0rem; --radius-image: 0rem; --radius-form: 0rem; --radius-badge: 0rem; --radius-control: 0rem; --shadow-card: none; }", theme), /--color-background-tertiary: #336600;/);
+assert.match(renderLayout(pagePlan.metadata), /"Trusted builders"/);
 assert.deepEqual(parseRelumeComponents({ content: [{ type: "text", text: [
   "// File: Header1.tsx",
   "```tsx",

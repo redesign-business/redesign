@@ -40,29 +40,39 @@ After every OpenCode invocation, the runner replaces the run's cumulative model-
 
    Output: `proof.md`, freeform except for the three outreach lines consumed by deterministic storage
 
-3. **(GPT-5.6 Sol) Choose the composition**
+3. **(DeepSeek V4 Flash) Plan the page**
 
-   Input: `proof.md`, every captured image and its contact sheets, the original screenshot, and Relume search
+   Input: `.redesign/planning-input.md`, containing `proof.md` and verified links
 
-   Output: an ordered list of 5-7 Relume component slugs
+   Output: `.redesign/page-plan.json`, containing metadata, one shared CTA, and ordered `{ id, purpose, proof[] }` sections
 
-4. **(Code) Install the selected Relume components**
+4. **(GPT-5 Nano + Relume MCP) Select components and images**
 
-   Input: selected Relume slugs
+   Input: `.redesign/selection-input.md` plus the image contact sheets
 
-   Output: deterministically installed section, element, primitive, hook, and utility files plus their original sources and immutable hashes
+   Output: `.redesign/section-selection.json`, containing one `{ id, slug, imageIds[] }` record per planned section
+
+5. **(Code) Install and package the selected components**
+
+   Input: `.redesign/section-selection.json`
+
+   Output: exact Relume files plus `.redesign/page-input.md`, which combines the page plan, selected prop APIs, assigned image records, original logo, CTA, and verified links
 
    Code installs the exact Relume sections and required primitives, preserving only the template's intentionally customized Button, utility, and media-query hook. It may add mechanical TypeScript compatibility annotations and a standard size constraint to bare logo images. Every original source and exact compatibility difference remains committed for comparison.
 
-5. **(GPT-5.6 Sol, same session) Populate and theme the page**
+6. **(DeepSeek V4 Flash) Compile the page**
 
-   Input: the installed components and all preceding context
+   Input: `.redesign/page-input.md`
 
-   Output: `app/page.tsx`, theme variables in `app/globals.css`, and metadata in `app/layout.tsx`
+   Output: `app/page.tsx`
 
-   The installed Relume source is read-only. Sol supplies typed props, copy, original images, verified destinations, and values for Relume's existing semantic color roles. A clear saturated logo color becomes `background-tertiary`, the primary CTA fill; all other roles use one neutral palette. Optional decorative props are omitted unless useful. Sol cannot invent routes or parallel color tokens, add named CSS classes, or edit component Tailwind classes.
+7. **(GPT-5 Nano, then code) Apply the theme and metadata**
 
-6. **(Code) Verify and deploy**
+   Input: original screenshot and image contact sheets
+
+   Output: `.redesign/theme.json`; code applies its values to Relume's existing variables in `app/globals.css` and writes metadata from `page-plan.json` to `app/layout.tsx`
+
+8. **(Code) Verify and deploy**
 
    Input: completed project
 
