@@ -15,7 +15,7 @@ import {
   slugFromUrl,
   websiteHost,
 } from "./redesign.js";
-import { extractContactInfo, extractOutreachProof, invalidPageLinks, isLikelyLogo, normalizeSameDomainUrl, parseSrcset, validLinkTargets } from "./research.js";
+import { extractContactInfo, extractOutreachProof, invalidPageLinks, isLikelyLogo, normalizeSameDomainUrl, parseSrcset, relumeButtonLabelsUseChildren, validLinkTargets } from "./research.js";
 
 assert.equal(phaseComplete(0), true);
 assert.equal(phaseComplete(0, false), false);
@@ -68,6 +68,8 @@ assert.deepEqual(invalidPageLinks([
   'const contact = { url: `${siteUrl}/contact` };',
   'const bad = { url: "/invented" };',
 ].join("\n"), ["/", "https://acme.test/contact"]), ["/invented"]);
+assert.equal(relumeButtonLabelsUseChildren('buttons={[{ children: "Contact", href: "/contact" }]}'), true);
+assert.equal(relumeButtonLabelsUseChildren('buttons={[{ title: "Contact", href: "/contact" }]}'), false);
 assert.equal(relumeComponentApi("components/relume/Header1.tsx", [
   "type Props = { heading: string };",
   "export type Header1Props = Partial<Props>;",

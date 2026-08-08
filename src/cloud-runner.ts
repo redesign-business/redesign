@@ -5,7 +5,7 @@ import { dirname } from "node:path";
 import { replaceRunSessions, updateBusinessContactInfo, updateRunData } from "./db.js";
 import { phaseComplete, redactSessionOutput } from "./phase.js";
 import { installRelumeComponents, verifyRelumeComponents, type RelumeInstall } from "./relume.js";
-import { collectResearch as collectResearchData, extractOutreachProof, invalidPageLinks } from "./research.js";
+import { collectResearch as collectResearchData, extractOutreachProof, invalidPageLinks, relumeButtonLabelsUseChildren } from "./research.js";
 
 type Usage = {
   model?: string;
@@ -341,6 +341,11 @@ async function validatePageLinks() {
   if (invalid.length) throw new Error(`app/page.tsx contains unverified destinations: ${invalid.join(", ")}`);
 }
 
+async function validateButtonLabels() {
+  const page = await readFile(`${WORKDIR}/app/page.tsx`, "utf8");
+  if (relumeButtonLabelsUseChildren(page)) throw new Error("app/page.tsx uses children for Relume button data; use title for every visible button label");
+}
+
 async function runOpenCodePhase(
   phase: string,
   model: string,
@@ -408,7 +413,15 @@ async function buildWithRepairs() {
   const builds: string[] = [];
   const repairs: string[] = [];
   for (let attempt = 0; attempt <= MAX_BUILD_REPAIRS; attempt += 1) {
-    const build = await sh("pnpm build", { allowFailure: true });
+    let build: { output: string; exitCode: number | null };
+    try {
+      await validateGlobalStyles();
+      await validatePageLinks();
+      await validateButtonLabels();
+      build = await sh("pnpm build", { allowFailure: true });
+    } catch (error) {
+      build = { output: error instanceof Error ? error.message : String(error), exitCode: 1 };
+    }
     builds.push(`build-${attempt + 1}`);
     await updateRun({ status: "build", buildCommands: builds, repairCommands: repairs });
     if (build.exitCode === 0) return { builds, repairs };
@@ -680,14 +693,13 @@ async function main() {
     maxContinues: 0,
   });
   await verifyRelumeComponents(WORKDIR, relumeInstall);
-  await validateGlobalStyles();
-  await validatePageLinks();
 
   await updateRun({ status: "build", implementationAttempts: implementation.attempts });
   const build = await buildWithRepairs();
   await verifyRelumeComponents(WORKDIR, relumeInstall);
   await validateGlobalStyles();
   await validatePageLinks();
+  await validateButtonLabels();
 
   await updateRun({ status: "commit", buildCommands: build.builds, repairCommands: build.repairs });
   await commitAll("feat: build landing page");

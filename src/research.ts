@@ -40,6 +40,10 @@ export function invalidPageLinks(page: string, validTargets: string[]) {
   return [...new Set(targets.filter((target) => target !== "/" && !(target.startsWith("#") && ids.has(target.slice(1))) && !allowed.has(target)))];
 }
 
+export function relumeButtonLabelsUseChildren(page: string) {
+  return /\bchildren\s*:/.test(page);
+}
+
 export function extractOutreachProof(markdown: string) {
   const section = markdown.match(/(?:^|\n)## Outreach\s*\n([\s\S]*?)(?=\n## |\s*$)/)?.[1] ?? "";
   const proof = section.match(/^(?:[-*]|\d+\.)\s+(.+)$/gm)?.map((line) => {
