@@ -303,8 +303,8 @@ async function createBuildAssetPack() {
 
 async function readRelumeSelection() {
   const selection = JSON.parse(await readFile(`${WORKDIR}/.redesign/relume-selection.json`, "utf8")) as { slugs?: unknown };
-  if (!Array.isArray(selection.slugs) || selection.slugs.length < 5 || selection.slugs.length > 7) {
-    throw new Error("Relume selection must contain 5-7 slugs");
+  if (!Array.isArray(selection.slugs) || selection.slugs.length === 0) {
+    throw new Error("Relume selection must contain at least one slug");
   }
   const slugs = selection.slugs.map(String);
   if (new Set(slugs).size !== slugs.length || slugs.some((slug) => !/^[a-z0-9_]+$/.test(slug))) {
