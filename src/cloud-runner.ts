@@ -347,6 +347,7 @@ async function runOpenCodePhase(
   args: string[],
   options: { agent?: string; deliverableDelivered?: () => Promise<boolean>; retryMessage?: string; maxContinues?: number } = {},
 ) {
+  const startedAt = Date.now();
   const attempts: string[] = [];
   let output = "";
   let currentArgs = args;
@@ -376,7 +377,11 @@ async function runOpenCodePhase(
       safeOutput,
     ].join("\n"));
     output += result.output;
-    await recordUsage();
+    const usage = await recordUsage();
+    await updateRun({
+      [`${phase}UsageCumulative`]: usage.usageByModel,
+      [`${phase}WallTimeSeconds`]: Math.round((Date.now() - startedAt) / 1_000),
+    });
     const delivered = options.deliverableDelivered ? await options.deliverableDelivered() : undefined;
     if (phaseComplete(result.exitCode, delivered)) return { output, attempts };
     if (isBudgetFailure(result.output)) throw new Error(`${phase} failed with budget/quota error\n${outputTail(result.output)}`);
