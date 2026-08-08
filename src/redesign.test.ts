@@ -46,14 +46,14 @@ assert.deepEqual(applyRelumeCompatibility([
 ].join("\n")), {
   content: [
     'import { type Variants, motion } from "motion/react";',
-    '<img className="h-8 w-auto max-w-[70vw] md:h-10" src={logo.src} alt={logo.alt} />',
-    '<img src={logo.src} alt={logo.alt} className="inline-block h-8 w-auto max-w-[70vw] md:h-10" />',
+    '<img className="h-6 w-auto max-w-[70vw] md:h-8" src={logo.src} alt={logo.alt} />',
+    '<img src={logo.src} alt={logo.alt} className="inline-block h-6 w-auto max-w-[70vw] md:h-8" />',
     "const lineVariants: Variants = { open: { transition: { ease: \"easeInOut\" } } };",
   ].join("\n"),
   edits: 3,
 });
-assert.deepEqual(applyRelumeCompatibility('<img className="h-8 w-auto max-w-[70vw] md:h-10" src={logo.src} alt={logo.alt} />'), {
-  content: '<img className="h-8 w-auto max-w-[70vw] md:h-10" src={logo.src} alt={logo.alt} />',
+assert.deepEqual(applyRelumeCompatibility('<img className="h-6 w-auto max-w-[70vw] md:h-8" src={logo.src} alt={logo.alt} />'), {
+  content: '<img className="h-6 w-auto max-w-[70vw] md:h-8" src={logo.src} alt={logo.alt} />',
   edits: 0,
 });
 assert.deepEqual(validLinkTargets(["https://acme.test/", "https://acme.test/contact"], [

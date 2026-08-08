@@ -126,11 +126,11 @@ export function applyRelumeCompatibility(content: string) {
   const logos = compatible.match(/<img\b[^>]*\bsrc=\{logo\.src\}[^>]*\/>/g) ?? [];
   let logoEdits = 0;
   for (const logo of logos) {
-    if (logo.includes("h-8 w-auto max-w-[70vw] md:h-10")) continue;
+    if (logo.includes("h-6 w-auto max-w-[70vw] md:h-8")) continue;
     if (/\bclassName="/.test(logo)) {
-      compatible = compatible.replace(logo, logo.replace(/\bclassName="([^"]*)"/, 'className="$1 h-8 w-auto max-w-[70vw] md:h-10"'));
+      compatible = compatible.replace(logo, logo.replace(/\bclassName="([^"]*)"/, 'className="$1 h-6 w-auto max-w-[70vw] md:h-8"'));
     } else {
-      compatible = compatible.replace(logo, logo.replace("<img", '<img className="h-8 w-auto max-w-[70vw] md:h-10"'));
+      compatible = compatible.replace(logo, logo.replace("<img", '<img className="h-6 w-auto max-w-[70vw] md:h-8"'));
     }
     logoEdits += 1;
   }

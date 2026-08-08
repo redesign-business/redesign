@@ -138,6 +138,7 @@ function buildImplementationPrompt() {
     "- If the original logo has a clear saturated color, assign it to the existing background-tertiary theme variable and give scheme-button-text an accessible neutral contrast color. Otherwise choose one restrained background-tertiary color. Use one neutral palette for every other role.",
     "- Do not add parallel primary, accent, brand, or foreground tokens, and do not add raw colors outside the existing Relume theme variables.",
     "- Use the shared Button default variant for every primary CTA. Use one CTA label consistently and do not add CTA-specific styling.",
+    "- Relume sections render `ButtonProps.title` as the visible label. Set `title` on every button object; never use `children` for button data.",
     "- Every link or button must use a destination from .redesign/valid-links.json or a real section ID in this page. Use an absolute original-site URL for an original subpage; never invent a local route. Omit the control if no verified destination fits.",
     "- Omit optional decorative props by default. Add a badge, tag, icon, secondary button, or social link only when it communicates unique useful information or performs a verified action.",
     "- Preserve a strong original color or font when present and always use the original logo.",
